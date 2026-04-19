@@ -1,5 +1,5 @@
 setlocal
-set BASE=c:\data\paintscan\data\work
+set BASE=c:\data\artandai\fix_221
 set GIMP="c:\Users\charl\AppData\Local\Programs\GIMP 2\bin\gimp-console-2.10.exe"
 set KEEPER="%BASE%\keepers"
 set NAME=%1
