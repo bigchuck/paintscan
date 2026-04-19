@@ -220,3 +220,66 @@ def draw_quad(
             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2, cv2.LINE_AA,
         )
     return out
+
+ 
+# ---------------------------------------------------------------------------
+# Lab-based multi-channel edge detection
+# ---------------------------------------------------------------------------
+ 
+def compute_lab_edges(
+    image: np.ndarray,
+    l_lo: int,
+    l_hi: int,
+    a_lo: int,
+    a_hi: int,
+    b_lo: int,
+    b_hi: int,
+    blur_ksize: int = 5,
+) -> np.ndarray:
+    """
+    Compute a merged edge map from all three CIE Lab channels via Canny and
+    return an *inverted* grayscale image (white background, black edges).
+ 
+    Running Canny independently on L*, a*, and b* captures edges that are
+    invisible to luminance-only detection — most notably yellow strokes on
+    light grounds, which vanish in L* but are strong in b*.
+ 
+    Parameters
+    ----------
+    image:
+        BGR input image (any resolution).
+    l_lo, l_hi:
+        Canny hysteresis thresholds for the L* (luminance) channel.
+        Pass l_hi=0 to suppress the luminance channel entirely.
+    a_lo, a_hi:
+        Canny thresholds for the a* (green↔red) channel.
+        Pass a_hi=0 to suppress.
+    b_lo, b_hi:
+        Canny thresholds for the b* (blue↔yellow) channel.
+        Pass b_hi=0 to suppress.
+    blur_ksize:
+        Gaussian blur kernel size applied to each channel before Canny.
+        Must be odd and ≥ 1.
+ 
+    Returns
+    -------
+    np.ndarray
+        Grayscale image (dtype uint8): 255 = background, 0 = edge.
+    """
+    ksize = blur_ksize if blur_ksize % 2 == 1 else blur_ksize + 1
+    ksize = max(1, ksize)
+ 
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2Lab)
+    l_ch, a_ch, b_ch = cv2.split(lab)
+ 
+    def _canny(ch: np.ndarray, lo: int, hi: int) -> np.ndarray:
+        if hi <= 0:
+            return np.zeros(ch.shape, dtype=np.uint8)
+        blurred = cv2.GaussianBlur(ch, (ksize, ksize), 0)
+        return cv2.Canny(blurred, lo, hi)
+ 
+    edges = np.maximum(
+        np.maximum(_canny(l_ch, l_lo, l_hi), _canny(a_ch, a_lo, a_hi)),
+        _canny(b_ch, b_lo, b_hi),
+    )
+    return cv2.bitwise_not(edges)

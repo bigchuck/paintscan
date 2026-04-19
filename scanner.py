@@ -6,7 +6,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from interact import edit_quad
+from interact import edit_quad, edit_edgemap
 from utils import (
     draw_quad,
     load_image,
@@ -29,6 +29,7 @@ class ScanConfig:
     trim_px: int = 2
     debug: bool = False
     interactive: bool = True
+    edgemap: bool = False
 
 
 @dataclass
@@ -653,6 +654,29 @@ def process_image(path: Path, out_dir: Path, cfg: ScanConfig, output_stem: str |
             warped=warped, src_path=path, out_dir=out_dir,
             jpg_quality=cfg.jpg_quality, output_stem=output_stem,
         )
+
+        # --- Edge-map session (--edgemap) ---
+        if cfg.edgemap:
+            stem = output_stem if output_stem is not None else path.stem
+            edgemap_result = edit_edgemap(
+                warped,
+                l_lo=cfg.canny_lo,
+                l_hi=cfg.canny_hi,
+            )
+            if edgemap_result is not None:
+                edges_full, thresholds = edgemap_result
+                edges_path     = out_dir / f"{stem}_edges.jpg"
+                edges_600_path = out_dir / f"{stem}_edges_600.jpg"
+                save_jpg(edges_path,     edges_full,                        quality=cfg.jpg_quality)
+                save_jpg(edges_600_path, resize_to_max_dim(edges_full, 600), quality=cfg.jpg_quality)
+                print(
+                    f"[INFO] Edge map saved — "
+                    f"L:{thresholds[0]}/{thresholds[1]}  "
+                    f"a:{thresholds[2]}/{thresholds[3]}  "
+                    f"b:{thresholds[4]}/{thresholds[5]}"
+                )
+            else:
+                print("[INFO] Edge map session cancelled — no edge files written.")
 
         if cfg.debug:
             debug_overlay = draw_quad(image_small, final_corners_small)

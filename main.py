@@ -35,6 +35,9 @@ Examples
 
   # Start partway through the alphabet (e.g. continuing a previous run):
   python main.py data/ --out output/ --prefix SA --num 221 --letter f
+
+  # Generate Lab edge maps interactively after each warp:
+  python main.py data/ --out output/ --edgemap
 """,
     )
 
@@ -122,6 +125,15 @@ Examples
         "--no-interactive", action="store_true",
         help="Skip the corner editor; use automatic detection only.",
     )
+    parser.add_argument(
+        "--edgemap", action="store_true",
+        help=(
+            "After each warp, open an interactive Lab edge-map tuner.  "
+            "Saves {stem}_edges.jpg (full resolution) and {stem}_edges_600.jpg "
+            "alongside the master outputs.  Sliders control Canny thresholds "
+            "for the L*, a*, and b* channels independently."
+        ),
+    )
 
     return parser.parse_args()
 
@@ -183,6 +195,7 @@ def main() -> int:
         trim_px=args.trim,
         debug=args.debug,
         interactive=not args.no_interactive,
+        edgemap=args.edgemap,
     )
 
     # --- collect images ---
