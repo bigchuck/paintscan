@@ -283,3 +283,26 @@ def compute_lab_edges(
         _canny(b_ch, b_lo, b_hi),
     )
     return cv2.bitwise_not(edges)
+
+def draw_quad_print(
+    image: np.ndarray,
+    corners: np.ndarray,
+    color: tuple = (0, 255, 0),
+) -> np.ndarray:
+    """Like draw_quad but scaled for print output (thick lines, large labels)."""
+    out = image.copy()
+    long_side = max(out.shape[:2])
+    thickness = max(4, long_side // 300)
+    radius    = max(12, long_side // 200)
+    font_scale = max(1.0, long_side / 1200)
+
+    pts = corners.astype(np.int32).reshape((-1, 1, 2))
+    cv2.polylines(out, [pts], isClosed=True, color=color, thickness=thickness)
+    for i, (x, y) in enumerate(corners.astype(np.int32)):
+        cv2.circle(out, (x, y), radius, (0, 0, 255), -1)
+        cv2.putText(
+            out, str(i), (x + radius + 4, y - radius),
+            cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 0, 0),
+            max(2, thickness - 1), cv2.LINE_AA,
+        )
+    return out

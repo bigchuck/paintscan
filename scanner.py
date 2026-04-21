@@ -650,9 +650,10 @@ def process_image(path: Path, out_dir: Path, cfg: ScanConfig, output_stem: str |
         warped       = warp_from_quad(image_full, corners_full)
         warped       = trim_border(warped, cfg.trim_px)
 
-        out_path, out_600, out_140 = save_master_and_derivatives(
+        out_path, out_600, out_140, out_print = save_master_and_derivatives(
             warped=warped, src_path=path, out_dir=out_dir,
             jpg_quality=cfg.jpg_quality, output_stem=output_stem,
+            corners=corners_full, image_full=image_full,
         )
 
         # --- Edge-map session (--edgemap) ---
@@ -715,3 +716,30 @@ def process_image(path: Path, out_dir: Path, cfg: ScanConfig, output_stem: str |
             accepted=False, used_interactive=False,
             message=f"ERROR: {e}",
         )
+    
+def save_master_and_derivatives(
+    warped: np.ndarray,
+    src_path: Path,
+    out_dir: Path,
+    jpg_quality: int,
+    output_stem: str | None = None,
+    corners: np.ndarray | None = None,       # add this
+    image_full: np.ndarray | None = None,    # add this
+) -> tuple[Path, Path, Path, Path | None]:
+    stem        = output_stem if output_stem is not None else src_path.stem
+    master_path = out_dir / f"{stem}_master.jpg"
+    path_600    = out_dir / f"{stem}_600.jpg"
+    path_140    = out_dir / f"{stem}_140.jpg"
+
+    save_jpg(master_path, warped, quality=jpg_quality)
+    save_jpg(path_600,    resize_to_max_dim(warped, 600), quality=jpg_quality)
+    save_jpg(path_140,    resize_to_max_dim(warped, 140), quality=jpg_quality)
+
+    print_path = None
+    if corners is not None and image_full is not None:
+        from utils import draw_quad_print
+        print_overlay = draw_quad_print(image_full, corners)
+        print_path = out_dir / f"{stem}_print_overlay.png"
+        cv2.imwrite(str(print_path), print_overlay)
+
+    return master_path, path_600, path_140, print_path
