@@ -36,6 +36,9 @@ Examples
   # Start partway through the alphabet (e.g. continuing a previous run):
   python main.py data/ --out output/ --prefix SA --num 221 --letter f
 
+  # Output relative to the input's directory (not the CWD):
+  python main.py c:/data/paintscan/data/SA223/SA223.jpg --out ./run4f --edgemap
+
   # Generate Lab edge maps interactively after each warp:
   python main.py data/ --out output/ --edgemap
 """,
@@ -53,7 +56,7 @@ Examples
         "--out",
         type=str,
         default="output",
-        help="Output folder (default: output).",
+        help="Output folder (default: output). Prefix with ./ to resolve relative to the input's directory.",
     )
 
     # --- batch rename ---
@@ -183,7 +186,14 @@ def main() -> int:
     _validate_rename_args(args)
 
     input_path = Path(args.input)
-    out_dir    = ensure_out_dir(Path(args.out))
+    # Allow "--out ./subdir" to mean: relative to the input's parent directory
+    # (or the input itself when it is a directory) rather than the CWD.
+    raw_out = args.out
+    if raw_out.startswith("./") or raw_out.startswith(".\\"):
+        anchor  = input_path if input_path.is_dir() else input_path.parent
+        out_dir = ensure_out_dir(anchor / raw_out[2:])
+    else:
+        out_dir = ensure_out_dir(Path(raw_out))
 
     cfg = ScanConfig(
         downscale_max_dim=args.max_dim,

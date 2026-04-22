@@ -611,6 +611,8 @@ def process_image(
         warped       = warp_from_quad(image_full, corners_full)
         warped       = trim_border(warped, cfg.trim_px)
 
+        # Master and derivatives are written immediately — independent of the
+        # edge-map session that may follow.
         out_path, out_600, out_140 = save_master_and_derivatives(
             warped=warped, src_path=path, out_dir=out_dir,
             jpg_quality=cfg.jpg_quality, output_stem=output_stem,
@@ -620,32 +622,31 @@ def process_image(
 
         # --- Edge-map session (--edgemap) ---
         if cfg.edgemap:
-            edgemap_result = edit_edgemap(
+            takes = edit_edgemap(
                 warped,
                 l_lo=cfg.canny_lo,
                 l_hi=cfg.canny_hi,
             )
-            if edgemap_result is not None:
-                edges_full, thresholds = edgemap_result
+            if takes:
+                for i, (edges_full, thresholds) in enumerate(takes, start=1):
+                    edges_path     = out_dir / f"{stem}_edges_{i}.jpg"
+                    edges_600_path = out_dir / f"{stem}_edges_{i}_600.jpg"
+                    overlay_path   = out_dir / f"{stem}_print_overlay_{i}.png"
 
-                # Save edge map derivatives
-                edges_path     = out_dir / f"{stem}_edges.jpg"
-                edges_600_path = out_dir / f"{stem}_edges_600.jpg"
-                save_jpg(edges_path,     edges_full,                         quality=cfg.jpg_quality)
-                save_jpg(edges_600_path, resize_to_max_dim(edges_full, 600), quality=cfg.jpg_quality)
+                    save_jpg(edges_path,     edges_full,                         quality=cfg.jpg_quality)
+                    save_jpg(edges_600_path, resize_to_max_dim(edges_full, 600), quality=cfg.jpg_quality)
 
-                # Print overlay: quad drawn on the full-res edge map
-                edges_bgr = cv2.cvtColor(edges_full, cv2.COLOR_GRAY2BGR)
-                cv2.imwrite(str(out_dir / f"{stem}_print_overlay.png"), edges_bgr)
+                    edges_bgr = cv2.cvtColor(edges_full, cv2.COLOR_GRAY2BGR)
+                    cv2.imwrite(str(overlay_path), edges_bgr)
 
-                print(
-                    f"[INFO] Edge map saved — "
-                    f"L:{thresholds[0]}/{thresholds[1]}  "
-                    f"a:{thresholds[2]}/{thresholds[3]}  "
-                    f"b:{thresholds[4]}/{thresholds[5]}"
-                )
+                    print(
+                        f"[INFO] Edge map {i} saved — "
+                        f"L:{thresholds[0]}/{thresholds[1]}  "
+                        f"a:{thresholds[2]}/{thresholds[3]}  "
+                        f"b:{thresholds[4]}/{thresholds[5]}"
+                    )
             else:
-                print("[INFO] Edge map session cancelled — no edge files written.")
+                print("[INFO] Edge map session closed — no edge files written.")
 
         # --- Debug overlays ---
         if cfg.debug:

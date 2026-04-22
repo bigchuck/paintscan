@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import cv2
@@ -151,7 +151,7 @@ def edit_quad(image: np.ndarray, initial_corners: np.ndarray) -> np.ndarray | No
 # Edge-map interactive editor
 # ===========================================================================
 
-_EDGEMAP_WINDOW = "paintscan - edge map  (T=take  Q/Esc=cancel)"
+_EDGEMAP_WINDOW = "paintscan - edge map  (T=take  Q/Esc=done)"
 
 # --- Layout constants -------------------------------------------------------
 _CTRL_W    = 300          # width of the custom slider control panel
@@ -170,7 +170,10 @@ _BTN_W, _BTN_H = 72, 34
 _BTN_CY        = _CTRL_TOP + 6 * _BAND_H + 48   # 38 + 660 + 48 = 746
 _BTN_RESET_CX  = 50
 _BTN_TAKE_CX   = 150
-_BTN_CANCEL_CX = 250
+_BTN_DONE_CX   = 250
+
+# Y for the take counter, just below the button row
+_TAKE_COUNT_Y  = _BTN_CY + _BTN_H // 2 + 22
 
 # Per-slider definitions: (label, min, max, default, BGR color)
 _SLIDER_DEFS: list[tuple[str, int, int, int, tuple[int, int, int]]] = [
@@ -226,8 +229,8 @@ class _EdgemapState:
     sliders:        list
     initial_values: list                # slider values at session open — for Reset
     drag_idx:       Optional[int] = None
-    accepted:       bool = False
-    cancelled:      bool = False
+    done:           bool = False        # set True to exit the session
+    takes:          list = field(default_factory=list)  # list of (edges_full, thresholds)
     edges_dirty:    bool = True
     edge_panel:     Optional[np.ndarray] = None   # current bordered BGR edge panel
 
@@ -236,7 +239,7 @@ class _EdgemapState:
 # Drawing helpers
 # ---------------------------------------------------------------------------
 
-def _draw_ctrl_panel(sliders: list) -> np.ndarray:
+def _draw_ctrl_panel(sliders: list, take_count: int = 0) -> np.ndarray:
     """Render the left-side control panel at _CTRL_W × _TOTAL_H."""
     panel = np.full((_TOTAL_H, _CTRL_W, 3), 28, dtype=np.uint8)
 
@@ -276,12 +279,25 @@ def _draw_ctrl_panel(sliders: list) -> np.ndarray:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.48, (190, 190, 190), 1, cv2.LINE_AA)
 
     # Three buttons
-    _draw_button(panel, "RESET",  _BTN_RESET_CX,  _BTN_CY, ( 90,  90,  30))
-    _draw_button(panel, "TAKE",   _BTN_TAKE_CX,   _BTN_CY, ( 35, 130,  35))
-    _draw_button(panel, "CANCEL", _BTN_CANCEL_CX, _BTN_CY, ( 35,  35, 130))
+    _draw_button(panel, "RESET", _BTN_RESET_CX, _BTN_CY, ( 90,  90,  30))
+    _draw_button(panel, "TAKE",  _BTN_TAKE_CX,  _BTN_CY, ( 35, 130,  35))
+    _draw_button(panel, "DONE",  _BTN_DONE_CX,  _BTN_CY, ( 70,  70,  70))
+
+    # Take counter below button row — highlighted when at least one take exists
+    if take_count == 0:
+        counter_text  = "taken: 0"
+        counter_color = (90, 90, 90)
+    else:
+        counter_text  = f"taken: {take_count}"
+        counter_color = (60, 200, 60)   # bright green
+
+    (tw, _), _ = cv2.getTextSize(counter_text, cv2.FONT_HERSHEY_SIMPLEX, 0.50, 1)
+    cv2.putText(panel, counter_text,
+                (_BTN_TAKE_CX - tw // 2, _TAKE_COUNT_Y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.50, counter_color, 1, cv2.LINE_AA)
 
     # Keyboard hint at bottom
-    cv2.putText(panel, "T=take  R=reset  Q/Esc=cancel",
+    cv2.putText(panel, "T=take  R=reset  Q/Esc=done",
                 (10, _TOTAL_H - 10),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.38, (110, 110, 110), 1, cv2.LINE_AA)
 
@@ -390,9 +406,9 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
                     sl.value = iv
                 state.edges_dirty = True
             elif _hit_button(x, y, _BTN_TAKE_CX, _BTN_CY):
-                state.accepted = True
-            elif _hit_button(x, y, _BTN_CANCEL_CX, _BTN_CY):
-                state.cancelled = True
+                _do_take(state)
+            elif _hit_button(x, y, _BTN_DONE_CX, _BTN_CY):
+                state.done = True
 
     elif event == cv2.EVENT_MOUSEMOVE:
         if state.drag_idx is not None:
@@ -407,6 +423,28 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Take helper
+# ---------------------------------------------------------------------------
+
+def _do_take(state: _EdgemapState) -> None:
+    """
+    Compute a full-resolution edge map from the current slider values and
+    append (edges_full, thresholds) to state.takes.  Does not close the session.
+    """
+    final_vals = tuple(sl.value for sl in state.sliders)
+
+    # Upscale from display resolution to full resolution via nearest-neighbour
+    # so the result exactly matches what is shown in the edge panel.
+    display_edges = compute_lab_edges(state.warped_display, *final_vals)
+    h_full, w_full = state.warped_full.shape[:2]
+    full_edges = cv2.resize(
+        display_edges, (w_full, h_full), interpolation=cv2.INTER_NEAREST
+    )
+
+    state.takes.append((full_edges, final_vals))
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -418,19 +456,22 @@ def edit_edgemap(
     a_hi: int = 90,
     b_lo: int = 30,
     b_hi: int = 90,
-) -> tuple[np.ndarray, tuple[int, int, int, int, int, int]] | None:
+) -> list[tuple[np.ndarray, tuple[int, int, int, int, int, int]]]:
     """
     Open a three-panel interactive window for Lab-based edge-map tuning.
 
     Layout (left → right):
-      • Control panel  — custom-drawn sliders + Reset / Take / Cancel buttons
+      • Control panel  — custom-drawn sliders + Reset / Take / Done buttons
       • Edge panel     — inverted edge map with 10px white border
       • Master panel   — warped painting with 10px white border
 
+    TAKE saves the current edge map and stays open so further takes can be made
+    with different threshold settings.  DONE (or Q / Esc) closes the session.
+
     Returns
     -------
-    (inverted_edges_full_res, (l_lo, l_hi, a_lo, a_hi, b_lo, b_hi))
-        or None if the user cancelled.
+    list of (edges_full_res, (l_lo, l_hi, a_lo, a_hi, b_lo, b_hi))
+        One entry per TAKE.  Empty list if the session was closed without taking.
     """
     initial_vals = [l_lo, l_hi, a_lo, a_hi, b_lo, b_hi]
 
@@ -462,7 +503,7 @@ def edit_edgemap(
     cv2.setMouseCallback(_EDGEMAP_WINDOW, _edgemap_mouse, state)
 
     # Bootstrap frame so the HWND is real before maximize
-    _bootstrap_ctrl = _draw_ctrl_panel(state.sliders)
+    _bootstrap_ctrl = _draw_ctrl_panel(state.sliders, take_count=0)
     state.edge_panel  = _make_edge_panel(state.warped_display, state.sliders)
     state.edges_dirty = False
     _bt_h = max(_bootstrap_ctrl.shape[0],
@@ -478,15 +519,12 @@ def edit_edgemap(
     _maximize_window(_EDGEMAP_WINDOW)
 
     try:
-        while True:
-            if state.accepted or state.cancelled:
-                break
-
+        while not state.done:
             if state.edges_dirty:
                 state.edge_panel  = _make_edge_panel(state.warped_display, state.sliders)
                 state.edges_dirty = False
 
-            ctrl_panel = _draw_ctrl_panel(state.sliders)
+            ctrl_panel = _draw_ctrl_panel(state.sliders, take_count=len(state.takes))
 
             target_h = max(
                 ctrl_panel.shape[0],
@@ -503,26 +541,15 @@ def edit_edgemap(
 
             key = cv2.waitKey(20) & 0xFF
             if key in (ord("t"), ord("T")):
-                state.accepted = True
+                _do_take(state)
             elif key in (ord("r"), ord("R")):
                 for sl, iv in zip(state.sliders, state.initial_values):
                     sl.value = iv
                 state.edges_dirty = True
-            elif key in (ord("q"), ord("Q"), 27):
-                state.cancelled = True
+            elif key in (ord("d"), ord("D"), ord("q"), ord("Q"), 27):
+                state.done = True
 
     finally:
         cv2.destroyWindow(_EDGEMAP_WINDOW)
 
-    if not state.accepted:
-        return None
-
-    # Compute final edge map at full resolution, scaling blur proportionally
-    # so the output matches what was seen in the UI panel (which was computed
-    # at _DISPLAY_H pixels height with blur_ksize=5).
-    final_vals    = tuple(sl.value for sl in state.sliders)
-    display_edges = compute_lab_edges(state.warped_display, *final_vals)
-    h_full, w_full = state.warped_full.shape[:2]
-    full_edges = cv2.resize(display_edges, (w_full, h_full), interpolation=cv2.INTER_NEAREST)
-
-    return full_edges, final_vals  # type: ignore[return-value]
+    return state.takes
