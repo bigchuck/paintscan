@@ -9,6 +9,7 @@ import numpy as np
 from interact import edit_quad, edit_edgemap
 from utils import (
     draw_quad,
+    draw_quad_print,
     load_image,
     order_corners,
     resize_for_preview,
@@ -249,7 +250,6 @@ def detect_line_quad(image_small: np.ndarray, cfg: ScanConfig) -> CandidateQuad 
             angle = 180.0 - angle
 
         if angle < 15:                              # near-horizontal
-            # Require the line to span ≥30 % of image width
             x_span = abs(x2 - x1)
             if x_span < w * 0.30:
                 continue
@@ -257,7 +257,6 @@ def detect_line_quad(image_small: np.ndarray, cfg: ScanConfig) -> CandidateQuad 
             horizontals.append({"line": (x1, y1, x2, y2), "pos": y_mid, "length": length})
 
         elif angle > 75:                            # near-vertical
-            # Require the line to span ≥30 % of image height
             y_span = abs(y2 - y1)
             if y_span < h * 0.30:
                 continue
@@ -322,7 +321,6 @@ def detect_line_quad(image_small: np.ndarray, cfg: ScanConfig) -> CandidateQuad 
     if score <= 0:
         return None
 
-    # Small bonus for clusters backed by a lot of evidence
     total_weight = sum(c["weight"] for c in [top, bottom, left, right])
     score += 0.05 * min(1.0, total_weight / 4000.0)
 
@@ -331,7 +329,7 @@ def detect_line_quad(image_small: np.ndarray, cfg: ScanConfig) -> CandidateQuad 
 
 
 # ---------------------------------------------------------------------------
-# Detection method 3: GrabCut + RANSAC (new)
+# Detection method 3: GrabCut + RANSAC
 # ---------------------------------------------------------------------------
 
 def _ransac_line(points: np.ndarray, n_iter: int = 600, thresh: float = 8.0) -> tuple | None:
@@ -380,35 +378,19 @@ def detect_grabcut_quad(image_small: np.ndarray, _cfg: ScanConfig) -> CandidateQ
     Use GrabCut to separate canvas from background, then fit straight lines
     to the four sides of the resulting mask boundary via RANSAC, and intersect
     them to get the four canvas corners.
-
-    Why this works better than pure edge detection for paintings:
-    - GrabCut uses colour statistics, not just gradients, so it isn't confused
-      by the many interior edges that paint strokes create.
-    - RANSAC is robust to the ragged/noisy boundary that GrabCut produces.
-
-    Seeding strategy
-    ----------------
-    The outermost 3 % of the image is marked as definite background (it almost
-    never contains canvas pixels).  The inner 80 % is marked as definite
-    foreground to give GrabCut a strong canvas colour model to work from.
-    The remaining annular region is left as "probable foreground" for GrabCut
-    to classify.
     """
     h, w = image_small.shape[:2]
 
-    # --- 1. Build the GrabCut seed mask ---
     border_frac  = 0.03
     fg_frac      = 0.11
     border_px    = int(min(h, w) * border_frac)
     fg_inset_px  = int(min(h, w) * fg_frac)
 
     mask = np.full((h, w), cv2.GC_PR_FGD, dtype=np.uint8)
-    # Thin outer strip = definite background
     mask[:border_px, :]  = cv2.GC_BGD
     mask[-border_px:, :] = cv2.GC_BGD
     mask[:, :border_px]  = cv2.GC_BGD
     mask[:, -border_px:] = cv2.GC_BGD
-    # Inner rectangle = definite foreground
     mask[fg_inset_px:-fg_inset_px, fg_inset_px:-fg_inset_px] = cv2.GC_FGD
 
     bgd_model = np.zeros((1, 65), np.float64)
@@ -422,21 +404,18 @@ def detect_grabcut_quad(image_small: np.ndarray, _cfg: ScanConfig) -> CandidateQ
         (mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), np.uint8(255), np.uint8(0)
     )
 
-    # --- 2. Clean up the mask ---
     ksize  = max(15, int(min(h, w) * 0.02))
-    ksize += ksize % 2 == 0           # ensure odd isn't needed — MORPH_RECT is fine either way
+    ksize += ksize % 2 == 0
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (ksize, ksize))
     fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel)
     fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN,  kernel)
 
-    # --- 3. Extract boundary pixels ---
     boundary = cv2.Canny(fg_mask, 50, 150)
-    yx = np.column_stack(np.where(boundary > 0))   # rows of (y, x)
+    yx = np.column_stack(np.where(boundary > 0))
     if len(yx) < 20:
         return None
-    pts_xy = yx[:, [1, 0]].astype(np.float32)     # convert to (x, y)
+    pts_xy = yx[:, [1, 0]].astype(np.float32)
 
-    # --- 4. Split boundary into four side zones ---
     left_pts   = pts_xy[pts_xy[:, 0] < w * 0.30]
     right_pts  = pts_xy[pts_xy[:, 0] > w * 0.70]
     top_pts    = pts_xy[pts_xy[:, 1] < h * 0.30]
@@ -446,7 +425,6 @@ def detect_grabcut_quad(image_small: np.ndarray, _cfg: ScanConfig) -> CandidateQ
     if any(len(s) < min_side_pts for s in [left_pts, right_pts, top_pts, bottom_pts]):
         return None
 
-    # --- 5. RANSAC line fit for each side ---
     L = _ransac_line(left_pts)
     R = _ransac_line(right_pts)
     T = _ransac_line(top_pts)
@@ -455,7 +433,6 @@ def detect_grabcut_quad(image_small: np.ndarray, _cfg: ScanConfig) -> CandidateQ
     if any(line is None for line in [L, R, T, B]):
         return None
 
-    # --- 6. Intersect side lines to get corners ---
     tl = _line_intersect(T, L)
     tr = _line_intersect(T, R)
     br = _line_intersect(B, R)
@@ -478,11 +455,6 @@ def detect_grabcut_quad(image_small: np.ndarray, _cfg: ScanConfig) -> CandidateQ
 # ---------------------------------------------------------------------------
 
 def detect_best_quad(image_small: np.ndarray, cfg: ScanConfig) -> CandidateQuad | None:
-    """
-    Run all three detectors and return the highest-scoring candidate.
-    GrabCut is tried first because it is the most expensive; if it already
-    produces a high-confidence result the others act as confirmation.
-    """
     candidates: list[CandidateQuad] = []
 
     for detector in [detect_grabcut_quad, detect_contour_quad, detect_line_quad]:
@@ -497,7 +469,7 @@ def detect_best_quad(image_small: np.ndarray, cfg: ScanConfig) -> CandidateQuad 
 
 
 # ---------------------------------------------------------------------------
-# Warp / output helpers (unchanged)
+# Warp / output helpers
 # ---------------------------------------------------------------------------
 
 def compute_output_size(corners: np.ndarray) -> tuple[int, int]:
@@ -561,10 +533,6 @@ def resize_to_max_dim(image: np.ndarray, max_dim: int) -> np.ndarray:
     return cv2.resize(image, (new_w, new_h), interpolation=interp)
 
 
-def build_derived_output_path(src_path: Path, out_dir: Path, suffix: str) -> Path:
-    return out_dir / f"{src_path.stem}{suffix}.jpg"
-
-
 def save_master_and_derivatives(
     warped: np.ndarray,
     src_path: Path,
@@ -572,17 +540,13 @@ def save_master_and_derivatives(
     jpg_quality: int,
     output_stem: str | None = None,
 ) -> tuple[Path, Path, Path]:
-    """Save master, 600px and 140px derivatives.
-
-    If output_stem is given (e.g. "SA221a"), output files are named
-    SA221a_master.jpg etc.  Otherwise src_path.stem is used.
-    """
+    """Save master, 600px and 140px derivatives."""
     stem        = output_stem if output_stem is not None else src_path.stem
     master_path = out_dir / f"{stem}_master.jpg"
     path_600    = out_dir / f"{stem}_600.jpg"
     path_140    = out_dir / f"{stem}_140.jpg"
 
-    save_jpg(master_path, warped, quality=jpg_quality)
+    save_jpg(master_path, warped,                        quality=jpg_quality)
     save_jpg(path_600,    resize_to_max_dim(warped, 600), quality=jpg_quality)
     save_jpg(path_140,    resize_to_max_dim(warped, 140), quality=jpg_quality)
 
@@ -593,16 +557,16 @@ def save_master_and_derivatives(
 # Main processing entry point
 # ---------------------------------------------------------------------------
 
-# A detection that scores above this threshold is accepted automatically
-# without opening the interactive corner editor.
-_AUTO_ACCEPT_THRESHOLD = 0.92
-
-# A detection that scores below this threshold is too unreliable to use as
-# the interactive editor's starting quad — fall back to the inset rectangle.
+_AUTO_ACCEPT_THRESHOLD      = 0.92
 _INTERACTIVE_SEED_THRESHOLD = 0.55
 
 
-def process_image(path: Path, out_dir: Path, cfg: ScanConfig, output_stem: str | None = None) -> ProcessResult:
+def process_image(
+    path: Path,
+    out_dir: Path,
+    cfg: ScanConfig,
+    output_stem: str | None = None,
+) -> ProcessResult:
     try:
         image_full  = load_image(path)
         image_small, scale = resize_for_preview(image_full, cfg.downscale_max_dim)
@@ -618,8 +582,6 @@ def process_image(path: Path, out_dir: Path, cfg: ScanConfig, output_stem: str |
             initial_method        = "fallback"
             initial_score         = None
 
-        # If the detection is too uncertain, seed the interactive editor with
-        # the simple inset quad — it's always closer to the truth than a bad guess.
         if initial_score is not None and initial_score < _INTERACTIVE_SEED_THRESHOLD:
             initial_corners_small = default_inset_quad(image_small, inset_ratio=0.10)
 
@@ -650,15 +612,15 @@ def process_image(path: Path, out_dir: Path, cfg: ScanConfig, output_stem: str |
         warped       = warp_from_quad(image_full, corners_full)
         warped       = trim_border(warped, cfg.trim_px)
 
-        out_path, out_600, out_140, out_print = save_master_and_derivatives(
+        out_path, out_600, out_140 = save_master_and_derivatives(
             warped=warped, src_path=path, out_dir=out_dir,
             jpg_quality=cfg.jpg_quality, output_stem=output_stem,
-            corners=corners_full, image_full=image_full,
         )
+
+        stem = output_stem if output_stem is not None else path.stem
 
         # --- Edge-map session (--edgemap) ---
         if cfg.edgemap:
-            stem = output_stem if output_stem is not None else path.stem
             edgemap_result = edit_edgemap(
                 warped,
                 l_lo=cfg.canny_lo,
@@ -666,10 +628,18 @@ def process_image(path: Path, out_dir: Path, cfg: ScanConfig, output_stem: str |
             )
             if edgemap_result is not None:
                 edges_full, thresholds = edgemap_result
+
+                # Save edge map derivatives
                 edges_path     = out_dir / f"{stem}_edges.jpg"
                 edges_600_path = out_dir / f"{stem}_edges_600.jpg"
-                save_jpg(edges_path,     edges_full,                        quality=cfg.jpg_quality)
+                save_jpg(edges_path,     edges_full,                         quality=cfg.jpg_quality)
                 save_jpg(edges_600_path, resize_to_max_dim(edges_full, 600), quality=cfg.jpg_quality)
+
+                # Print overlay: quad drawn on the full-res edge map
+                edges_bgr     = cv2.cvtColor(edges_full, cv2.COLOR_GRAY2BGR)
+                print_overlay = draw_quad_print(edges_bgr, corners_full)
+                cv2.imwrite(str(out_dir / f"{stem}_print_overlay.png"), print_overlay)
+
                 print(
                     f"[INFO] Edge map saved — "
                     f"L:{thresholds[0]}/{thresholds[1]}  "
@@ -679,6 +649,7 @@ def process_image(path: Path, out_dir: Path, cfg: ScanConfig, output_stem: str |
             else:
                 print("[INFO] Edge map session cancelled — no edge files written.")
 
+        # --- Debug overlays ---
         if cfg.debug:
             debug_overlay = draw_quad(image_small, final_corners_small)
             save_jpg(out_dir / f"{path.stem}_debug_overlay.jpg", debug_overlay, quality=cfg.jpg_quality)
@@ -716,30 +687,3 @@ def process_image(path: Path, out_dir: Path, cfg: ScanConfig, output_stem: str |
             accepted=False, used_interactive=False,
             message=f"ERROR: {e}",
         )
-    
-def save_master_and_derivatives(
-    warped: np.ndarray,
-    src_path: Path,
-    out_dir: Path,
-    jpg_quality: int,
-    output_stem: str | None = None,
-    corners: np.ndarray | None = None,       # add this
-    image_full: np.ndarray | None = None,    # add this
-) -> tuple[Path, Path, Path, Path | None]:
-    stem        = output_stem if output_stem is not None else src_path.stem
-    master_path = out_dir / f"{stem}_master.jpg"
-    path_600    = out_dir / f"{stem}_600.jpg"
-    path_140    = out_dir / f"{stem}_140.jpg"
-
-    save_jpg(master_path, warped, quality=jpg_quality)
-    save_jpg(path_600,    resize_to_max_dim(warped, 600), quality=jpg_quality)
-    save_jpg(path_140,    resize_to_max_dim(warped, 140), quality=jpg_quality)
-
-    print_path = None
-    if corners is not None and image_full is not None:
-        from utils import draw_quad_print
-        print_overlay = draw_quad_print(image_full, corners)
-        print_path = out_dir / f"{stem}_print_overlay.png"
-        cv2.imwrite(str(print_path), print_overlay)
-
-    return master_path, path_600, path_140, print_path

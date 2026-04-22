@@ -336,14 +336,7 @@ def _scale_to_height(image: np.ndarray, target_h: int) -> np.ndarray:
 def _maximize_window(title: str) -> None:
     """
     Ask the OS to maximize *title* into the work area (screen minus taskbar).
-
-    Strategy (tried in order):
-    1. Windows — ctypes SW_MAXIMIZE on the HWND.  The window must already be
-       visible (call cv2.imshow + cv2.waitKey(1) before invoking this).
-    2. Fallback — resize to screen dimensions via tkinter query, minus 60px
-       for a typical taskbar.  Less accurate but works on Linux / macOS.
     """
-    # Windows path
     try:
         import ctypes
         SW_MAXIMIZE = 3
@@ -354,7 +347,6 @@ def _maximize_window(title: str) -> None:
     except Exception:
         pass
 
-    # Fallback: manual resize via tkinter screen query
     try:
         import tkinter as tk
         root = tk.Tk()
@@ -435,12 +427,6 @@ def edit_edgemap(
       • Edge panel     — inverted edge map with 10px white border
       • Master panel   — warped painting with 10px white border
 
-    Both image panels are scaled to _DISPLAY_H before the border is applied
-    so they align vertically.  The window opens maximized (screen width ×
-    screen height minus ~60px for the OS taskbar).
-
-    Keyboard: T = take,  R = reset sliders,  Q / Esc = cancel.
-
     Returns
     -------
     (inverted_edges_full_res, (l_lo, l_hi, a_lo, a_hi, b_lo, b_hi))
@@ -472,9 +458,6 @@ def edit_edgemap(
         edges_dirty    = True,
     )
 
-    # Open window and maximize via the OS (not manual pixel sizing).
-    # We must show one frame first so the window handle exists before
-    # the platform maximize call tries to look it up.
     cv2.namedWindow(_EDGEMAP_WINDOW, cv2.WINDOW_NORMAL)
     cv2.setMouseCallback(_EDGEMAP_WINDOW, _edgemap_mouse, state)
 
@@ -505,7 +488,6 @@ def edit_edgemap(
 
             ctrl_panel = _draw_ctrl_panel(state.sliders)
 
-            # All three panels must share the same height for hstack
             target_h = max(
                 ctrl_panel.shape[0],
                 state.edge_panel.shape[0],
@@ -535,7 +517,14 @@ def edit_edgemap(
     if not state.accepted:
         return None
 
-    # Compute final edge map at full resolution
-    final_vals = tuple(sl.value for sl in state.sliders)
-    full_edges = compute_lab_edges(state.warped_full, *final_vals)
+    # Compute final edge map at full resolution, scaling blur proportionally
+    # so the output matches what was seen in the UI panel (which was computed
+    # at _DISPLAY_H pixels height with blur_ksize=5).
+    final_vals   = tuple(sl.value for sl in state.sliders)
+    scale_factor = state.warped_full.shape[0] / state.warped_display.shape[0]
+    scaled_ksize = max(3, int(round(5 * scale_factor)))
+    if scaled_ksize % 2 == 0:
+        scaled_ksize += 1
+    full_edges = compute_lab_edges(state.warped_full, *final_vals, blur_ksize=scaled_ksize)
+
     return full_edges, final_vals  # type: ignore[return-value]
