@@ -9,7 +9,6 @@ import numpy as np
 from interact import edit_quad, edit_edgemap
 from utils import (
     draw_quad,
-    draw_quad_print,
     load_image,
     order_corners,
     resize_for_preview,

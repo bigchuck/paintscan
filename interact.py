@@ -520,7 +520,9 @@ def edit_edgemap(
     # Compute final edge map at full resolution, scaling blur proportionally
     # so the output matches what was seen in the UI panel (which was computed
     # at _DISPLAY_H pixels height with blur_ksize=5).
-    final_vals   = tuple(sl.value for sl in state.sliders)
-    full_edges = compute_lab_edges(state.warped_full, *final_vals)
+    final_vals    = tuple(sl.value for sl in state.sliders)
+    display_edges = compute_lab_edges(state.warped_display, *final_vals)
+    h_full, w_full = state.warped_full.shape[:2]
+    full_edges = cv2.resize(display_edges, (w_full, h_full), interpolation=cv2.INTER_NEAREST)
 
     return full_edges, final_vals  # type: ignore[return-value]
