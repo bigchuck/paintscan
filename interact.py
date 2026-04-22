@@ -521,10 +521,6 @@ def edit_edgemap(
     # so the output matches what was seen in the UI panel (which was computed
     # at _DISPLAY_H pixels height with blur_ksize=5).
     final_vals   = tuple(sl.value for sl in state.sliders)
-    scale_factor = state.warped_full.shape[0] / state.warped_display.shape[0]
-    scaled_ksize = max(3, int(round(5 * scale_factor)))
-    if scaled_ksize % 2 == 0:
-        scaled_ksize += 1
-    full_edges = compute_lab_edges(state.warped_full, *final_vals, blur_ksize=scaled_ksize)
+    full_edges = compute_lab_edges(state.warped_full, *final_vals)
 
     return full_edges, final_vals  # type: ignore[return-value]

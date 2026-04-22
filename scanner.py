@@ -636,9 +636,8 @@ def process_image(
                 save_jpg(edges_600_path, resize_to_max_dim(edges_full, 600), quality=cfg.jpg_quality)
 
                 # Print overlay: quad drawn on the full-res edge map
-                edges_bgr     = cv2.cvtColor(edges_full, cv2.COLOR_GRAY2BGR)
-                print_overlay = draw_quad_print(edges_bgr, corners_full)
-                cv2.imwrite(str(out_dir / f"{stem}_print_overlay.png"), print_overlay)
+                edges_bgr = cv2.cvtColor(edges_full, cv2.COLOR_GRAY2BGR)
+                cv2.imwrite(str(out_dir / f"{stem}_print_overlay.png"), edges_bgr)
 
                 print(
                     f"[INFO] Edge map saved — "
