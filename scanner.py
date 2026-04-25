@@ -15,7 +15,10 @@ from utils import (
     save_jpg,
     scale_points,
     save_session,
+    load_session,
     session_path_for,
+    thresholds_from_session,
+    stem_from_master,
     SessionData,
     SCHEMA_VERSION,
     _thresholds_dict,
@@ -565,6 +568,50 @@ def save_master_and_derivatives(
 
 
 # ---------------------------------------------------------------------------
+# Shared edge-file writing helper
+# ---------------------------------------------------------------------------
+
+def _write_edge_takes(
+    takes: list,
+    stem: str,
+    out_dir: Path,
+    jpg_quality: int,
+    start_index: int = 1,
+) -> list[dict]:
+    """Write edge JPEG + 600px + overlay PNG for each take.
+
+    *start_index* lets re-entry sessions continue numbering from where the
+    previous session left off (e.g. 3, 4, 5 …) rather than overwriting
+    existing files.
+
+    Returns a list of threshold dicts (one per take) ready to be stored in
+    the session JSON.
+    """
+    take_records: list[dict] = []
+    for offset, (edges_full, thresholds) in enumerate(takes):
+        i              = start_index + offset
+        edges_path     = out_dir / f"{stem}_edges_{i}.jpg"
+        edges_600_path = out_dir / f"{stem}_edges_{i}_600.jpg"
+        overlay_path   = out_dir / f"{stem}_print_overlay_{i}.png"
+
+        save_jpg(edges_path,     edges_full,                         quality=jpg_quality)
+        save_jpg(edges_600_path, resize_to_max_dim(edges_full, 600), quality=jpg_quality)
+
+        edges_bgr = cv2.cvtColor(edges_full, cv2.COLOR_GRAY2BGR)
+        cv2.imwrite(str(overlay_path), edges_bgr)
+
+        print(
+            f"[INFO] Edge map {i} saved — "
+            f"L:{thresholds[0]}/{thresholds[1]}  "
+            f"a:{thresholds[2]}/{thresholds[3]}  "
+            f"b:{thresholds[4]}/{thresholds[5]}"
+        )
+        take_records.append({"index": i, **_thresholds_dict(*thresholds)})
+
+    return take_records
+
+
+# ---------------------------------------------------------------------------
 # Main processing entry point
 # ---------------------------------------------------------------------------
 
@@ -645,23 +692,7 @@ def process_image(
                 b_hi=cfg.lab_b_hi,
             )
             if edgemap_takes:
-                for i, (edges_full, thresholds) in enumerate(edgemap_takes, start=1):
-                    edges_path     = out_dir / f"{stem}_edges_{i}.jpg"
-                    edges_600_path = out_dir / f"{stem}_edges_{i}_600.jpg"
-                    overlay_path   = out_dir / f"{stem}_print_overlay_{i}.png"
-
-                    save_jpg(edges_path,     edges_full,                         quality=cfg.jpg_quality)
-                    save_jpg(edges_600_path, resize_to_max_dim(edges_full, 600), quality=cfg.jpg_quality)
-
-                    edges_bgr = cv2.cvtColor(edges_full, cv2.COLOR_GRAY2BGR)
-                    cv2.imwrite(str(overlay_path), edges_bgr)
-
-                    print(
-                        f"[INFO] Edge map {i} saved — "
-                        f"L:{thresholds[0]}/{thresholds[1]}  "
-                        f"a:{thresholds[2]}/{thresholds[3]}  "
-                        f"b:{thresholds[4]}/{thresholds[5]}"
-                    )
+                _write_edge_takes(edgemap_takes, stem, out_dir, cfg.jpg_quality, start_index=1)
             else:
                 print("[INFO] Edge map session closed — no edge files written.")
 
@@ -670,10 +701,7 @@ def process_image(
         sess_path = session_path_for(out_dir, stem)
 
         takes_data = [
-            {
-                "index": i,
-                **_thresholds_dict(*thresholds),
-            }
+            {"index": i, **_thresholds_dict(*thresholds)}
             for i, (_edges, thresholds) in enumerate(edgemap_takes, start=1)
         ]
 
@@ -729,6 +757,114 @@ def process_image(
     except Exception as e:
         return ProcessResult(
             source=path, output_master=None,
+            confidence=None, method=None,
+            accepted=False, used_interactive=False,
+            message=f"ERROR: {e}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Re-entry from master
+# ---------------------------------------------------------------------------
+
+def process_from_master(
+    master_path: Path,
+    out_dir: Path,
+    cfg: ScanConfig,
+) -> ProcessResult:
+    """Open an already-warped ``*_master.jpg`` directly in the Lab edge-map
+    editor, bypassing detection and the corner editor entirely.
+
+    Behaviour
+    ---------
+    * The output stem is inferred by stripping ``_master`` from the filename.
+    * If a ``{stem}_session.json`` exists in *out_dir* its last-take thresholds
+      seed the sliders; otherwise the cfg Lab defaults are used.
+    * New takes are **appended** to the existing session (index continues from
+      the last recorded take) so history is preserved across re-entry sessions.
+    * The session JSON is always updated on return — even when no new takes are
+      made, the timestamp is refreshed to record the review visit.
+    """
+    from datetime import datetime as _dt
+
+    try:
+        stem      = stem_from_master(master_path)
+        sess_path = session_path_for(out_dir, stem)
+
+        # --- Load existing session (if any) ---
+        existing = load_session(sess_path)
+
+        if existing is not None:
+            seed = thresholds_from_session(existing, prefer_last_take=True)
+            next_index = (existing.takes[-1]["index"] + 1) if existing.takes else 1
+            print(f"[INFO] Session restored from {sess_path.name}  "
+                  f"({len(existing.takes)} previous take(s))")
+        else:
+            seed = {
+                "l_lo": cfg.canny_lo,  "l_hi": cfg.canny_hi,
+                "a_lo": cfg.lab_a_lo,  "a_hi": cfg.lab_a_hi,
+                "b_lo": cfg.lab_b_lo,  "b_hi": cfg.lab_b_hi,
+            }
+            next_index = 1
+            print(f"[INFO] No session file found for {stem!r} — starting fresh")
+
+        # --- Load master image ---
+        warped = load_image(master_path)
+
+        # --- Edge-map session ---
+        new_takes = edit_edgemap(
+            warped,
+            l_lo=seed["l_lo"], l_hi=seed["l_hi"],
+            a_lo=seed["a_lo"], a_hi=seed["a_hi"],
+            b_lo=seed["b_lo"], b_hi=seed["b_hi"],
+        )
+
+        if new_takes:
+            new_records = _write_edge_takes(
+                new_takes, stem, out_dir, cfg.jpg_quality,
+                start_index=next_index,
+            )
+        else:
+            new_records = []
+            print("[INFO] Edge map session closed — no new edge files written.")
+
+        # --- Update session ---
+        prior_takes   = existing.takes        if existing else []
+        corners_full  = existing.corners_full if existing else []
+        init_thresh   = existing.initial_thresholds if existing else seed
+        local_regions = existing.local_regions if existing else []
+        source_path   = existing.source_path  if existing else str(master_path.resolve())
+
+        updated_session = SessionData(
+            schema_version     = SCHEMA_VERSION,
+            timestamp          = _dt.now().isoformat(timespec="seconds"),
+            source_path        = source_path,
+            output_stem        = stem,
+            corners_full       = corners_full,
+            initial_thresholds = init_thresh,
+            takes              = prior_takes + new_records,
+            local_regions      = local_regions,
+        )
+        save_session(sess_path, updated_session)
+        print(f"[INFO] Session updated: {sess_path.name}  "
+              f"(total takes: {len(updated_session.takes)})")
+
+        master_out = out_dir / f"{stem}_master.jpg"
+
+        return ProcessResult(
+            source           = master_path,
+            output_master    = master_out if master_out.exists() else None,
+            confidence       = None,
+            method           = "from-master",
+            accepted         = True,
+            used_interactive = True,
+            message          = "OK",
+            session_path     = sess_path,
+        )
+
+    except Exception as e:
+        return ProcessResult(
+            source=master_path, output_master=None,
             confidence=None, method=None,
             accepted=False, used_interactive=False,
             message=f"ERROR: {e}",

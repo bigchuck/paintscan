@@ -54,6 +54,35 @@ def iter_input_images(path: Path) -> Iterable[Path]:
                 yield p
 
 
+def iter_master_images(path: Path) -> Iterable[Path]:
+    """Yield ``*_master.jpg`` files under *path* (single file or directory).
+
+    A single file is accepted only if its stem ends with ``_master``.
+    A directory is scanned for all files whose stem ends with ``_master``
+    and whose extension is a recognised image type, sorted alphabetically.
+    """
+    if path.is_file():
+        if path.stem.endswith("_master") and path.suffix.lower() in IMAGE_EXTS:
+            yield path
+        return
+
+    if path.is_dir():
+        for p in sorted(path.iterdir()):
+            if p.is_file() and p.stem.endswith("_master") and p.suffix.lower() in IMAGE_EXTS:
+                yield p
+
+
+def stem_from_master(master_path: Path) -> str:
+    """Derive the output stem from a ``*_master.jpg`` path.
+
+    ``SA221a_master.jpg``  →  ``"SA221a"``
+    """
+    stem = master_path.stem
+    if stem.endswith("_master"):
+        return stem[: -len("_master")]
+    return stem
+
+
 def ensure_out_dir(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path

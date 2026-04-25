@@ -4,11 +4,12 @@ import argparse
 import sys
 from pathlib import Path
 
-from scanner import ProcessResult, ScanConfig, process_image
+from scanner import ProcessResult, ScanConfig, process_image, process_from_master
 from utils import (
     ensure_out_dir,
     generate_batch_names,
     iter_input_images,
+    iter_master_images,
     sort_images_by_datetime,
 )
 
@@ -41,6 +42,12 @@ Examples
 
   # Generate Lab edge maps interactively after each warp:
   python main.py data/ --out output/ --edgemap
+
+  # Re-enter Lab editor for a single already-warped master (session restored):
+  python main.py SA221a_master.jpg --from-master
+
+  # Re-enter Lab editor for all masters in an output folder:
+  python main.py output/ --from-master
 """,
     )
 
@@ -55,8 +62,24 @@ Examples
     parser.add_argument(
         "--out",
         type=str,
-        default="output",
-        help="Output folder (default: output). Prefix with ./ to resolve relative to the input's directory.",
+        default=None,
+        help=(
+            "Output folder.  Defaults to 'output' in normal mode, or to the "
+            "master file's parent directory in --from-master mode.  "
+            "Prefix with ./ to resolve relative to the input's directory."
+        ),
+    )
+
+    # --- re-entry mode ---
+    parser.add_argument(
+        "--from-master",
+        action="store_true",
+        help=(
+            "Re-enter the Lab edge-map editor for an already-warped "
+            "*_master.jpg (or a folder of them).  Skips detection and corner "
+            "editing entirely.  Session thresholds are restored from the "
+            "matching *_session.json when present."
+        ),
     )
 
     # --- batch rename ---
@@ -166,7 +189,7 @@ def _print_result(res: ProcessResult, output_stem: str | None) -> None:
     if res.accepted:
         method_info = (
             f"method={res.method}, interactive"
-            if res.used_interactive
+            if res.used_interactive and res.method != "from-master"
             else f"method={res.method}, score={res.confidence:.3f}"
             if res.confidence is not None
             else f"method={res.method}"
@@ -178,44 +201,44 @@ def _print_result(res: ProcessResult, output_stem: str | None) -> None:
         print(f"[FAIL] {src} -> {res.message}")
 
 
+def _resolve_out_dir(args: argparse.Namespace, input_path: Path) -> Path:
+    """Return the resolved output directory for normal (non-from-master) mode."""
+    raw_out = args.out or "output"
+    if raw_out.startswith("./") or raw_out.startswith(".\\"):
+        anchor = input_path if input_path.is_dir() else input_path.parent
+        return ensure_out_dir(anchor / raw_out[2:])
+    return ensure_out_dir(Path(raw_out))
+
+
 # ---------------------------------------------------------------------------
-# Main
+# Run modes
 # ---------------------------------------------------------------------------
 
-def main() -> int:
-    args = parse_args()
+def run_normal(args: argparse.Namespace) -> int:
+    """Standard detect → corner-edit → warp → (edgemap) pipeline."""
     _validate_rename_args(args)
 
     input_path = Path(args.input)
-    # Allow "--out ./subdir" to mean: relative to the input's parent directory
-    # (or the input itself when it is a directory) rather than the CWD.
-    raw_out = args.out
-    if raw_out.startswith("./") or raw_out.startswith(".\\"):
-        anchor  = input_path if input_path.is_dir() else input_path.parent
-        out_dir = ensure_out_dir(anchor / raw_out[2:])
-    else:
-        out_dir = ensure_out_dir(Path(raw_out))
+    out_dir    = _resolve_out_dir(args, input_path)
 
     cfg = ScanConfig(
-        downscale_max_dim=args.max_dim,
-        blur_ksize=args.blur,
-        canny_lo=args.canny_lo,
-        canny_hi=args.canny_hi,
-        contour_min_area_ratio=args.min_area_ratio,
-        jpg_quality=args.quality,
-        trim_px=args.trim,
-        debug=args.debug,
-        interactive=not args.no_interactive,
-        edgemap=args.edgemap,
+        downscale_max_dim      = args.max_dim,
+        blur_ksize             = args.blur,
+        canny_lo               = args.canny_lo,
+        canny_hi               = args.canny_hi,
+        contour_min_area_ratio = args.min_area_ratio,
+        jpg_quality            = args.quality,
+        trim_px                = args.trim,
+        debug                  = args.debug,
+        interactive            = not args.no_interactive,
+        edgemap                = args.edgemap,
     )
 
-    # --- collect images ---
     raw_images = list(iter_input_images(input_path))
     if not raw_images:
         print("No input images found.")
         return 1
 
-    # --- batch renaming: sort by datetime and assign stems ---
     use_rename = (args.prefix is not None and args.num is not None)
 
     if use_rename:
@@ -239,8 +262,7 @@ def main() -> int:
         ]
 
         print(f"[INFO] Batch rename: {len(work_items)} image(s), "
-              f"{args.prefix}{args.num}{args.letter} … "
-              f"{names[-1]}")
+              f"{args.prefix}{args.num}{args.letter} … {names[-1]}")
         print("[INFO] Capture-datetime order:")
         for (path, dt), stem in zip(sorted_pairs, names):
             print(f"         {stem}  {path.name}  ({dt:%Y-%m-%d %H:%M:%S})")
@@ -248,16 +270,12 @@ def main() -> int:
     else:
         work_items = [(p, None) for p in raw_images]
 
-    # --- process ---
-    ok_count   = 0
-    fail_count = 0
-
+    ok_count = fail_count = 0
     for img_path, output_stem in work_items:
         print(f"[INFO] Processing: {img_path.name}"
               + (f"  ->  {output_stem}" if output_stem else ""))
         res = process_image(img_path, out_dir, cfg, output_stem=output_stem)
         _print_result(res, output_stem)
-
         if res.accepted:
             ok_count += 1
         else:
@@ -265,6 +283,65 @@ def main() -> int:
 
     print(f"\nDone.  OK={ok_count}  FAIL={fail_count}")
     return 0 if ok_count > 0 else 1
+
+
+def run_from_master(args: argparse.Namespace) -> int:
+    """Re-entry mode: load *_master.jpg, restore session, open Lab editor."""
+    input_path = Path(args.input)
+
+    masters = list(iter_master_images(input_path))
+    if not masters:
+        print(f"No *_master.jpg files found at: {input_path}")
+        return 1
+
+    cfg = ScanConfig(
+        jpg_quality = args.quality,
+        canny_lo    = args.canny_lo,
+        canny_hi    = args.canny_hi,
+        debug       = args.debug,
+        # lab a/b defaults — overridden by session restore when available
+        lab_a_lo    = 30,
+        lab_a_hi    = 90,
+        lab_b_lo    = 30,
+        lab_b_hi    = 90,
+    )
+
+    print(f"[INFO] From-master mode: {len(masters)} file(s)")
+
+    ok_count = fail_count = 0
+    for master_path in masters:
+        # Out dir: explicit --out wins; otherwise use the master's own directory
+        if args.out is not None:
+            raw_out = args.out
+            if raw_out.startswith("./") or raw_out.startswith(".\\"):
+                anchor  = master_path.parent
+                out_dir = ensure_out_dir(anchor / raw_out[2:])
+            else:
+                out_dir = ensure_out_dir(Path(raw_out))
+        else:
+            out_dir = master_path.parent  # outputs already live here
+
+        print(f"[INFO] Re-entering: {master_path.name}  (out: {out_dir})")
+        res = process_from_master(master_path, out_dir, cfg)
+        _print_result(res, output_stem=None)
+        if res.accepted:
+            ok_count += 1
+        else:
+            fail_count += 1
+
+    print(f"\nDone.  OK={ok_count}  FAIL={fail_count}")
+    return 0 if ok_count > 0 else 1
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> int:
+    args = parse_args()
+    if args.from_master:
+        return run_from_master(args)
+    return run_normal(args)
 
 
 if __name__ == "__main__":
