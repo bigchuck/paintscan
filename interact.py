@@ -248,6 +248,12 @@ class _EdgemapState:
     # Cached raw inv_gray at display resolution — fed to the flood filler
     inv_gray_cache: Optional[np.ndarray] = None
 
+    # Committed local patches — each exit-local (via L/EXIT LOCAL/click-outside)
+    # bakes the local result into this list.  The global edge display composites
+    # all patches so their effect is visible without re-entering local mode.
+    # Esc discards without committing.  RESET clears all patches.
+    patches:          list = field(default_factory=list)   # list of {mask,thresholds,bbox}
+
     # Local region
     local_mode:       bool = False
     local_mask:       Optional[np.ndarray] = None   # uint8, display-res; 255=selected
@@ -257,6 +263,7 @@ class _EdgemapState:
     local_sliders:    list = field(default_factory=list)
     local_init_vals:  list = field(default_factory=list)
     local_drag_idx:   Optional[int] = None
+    local_patch_idx:  Optional[int] = None   # index into patches when editing existing; None = new region
     local_dirty:      bool = False
     local_edge_panel: Optional[np.ndarray] = None
     local_zoom_panel: Optional[np.ndarray] = None
@@ -274,13 +281,19 @@ def _draw_ctrl_panel(
     local_mode: bool = False,
     local_sliders: list | None = None,
     local_seal: int = _SEAL_DEFAULT,
+    patch_count: int = 0,
+    local_patch_idx: int | None = None,
 ) -> np.ndarray:
     panel = np.full((_TOTAL_H, _CTRL_W, 3), 28, dtype=np.uint8)
 
     # Title bar
     if local_mode:
-        title_bg   = (0, 100, 180)
-        title_text = "LOCAL MODE"
+        if local_patch_idx is not None:
+            title_bg   = (0, 80, 140)
+            title_text = f"EDIT PATCH #{local_patch_idx + 1}"
+        else:
+            title_bg   = (0, 100, 180)
+            title_text = "LOCAL MODE"
     else:
         title_bg   = (45, 45, 45)
         title_text = "Lab Edge Thresholds"
@@ -324,6 +337,17 @@ def _draw_ctrl_panel(
     cv2.putText(panel, cnt_text, (_BTN_TAKE_CX - tw // 2, _TAKE_COUNT_Y),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.50, cnt_col, 1, cv2.LINE_AA)
 
+    # Patches count (below taken counter)
+    if patch_count > 0:
+        ptch_text  = f"patches: {patch_count}"
+        ptch_color = _AMBER
+    else:
+        ptch_text  = "patches: 0"
+        ptch_color = (70, 70, 70)
+    (tw, _), _ = cv2.getTextSize(ptch_text, cv2.FONT_HERSHEY_SIMPLEX, 0.44, 1)
+    cv2.putText(panel, ptch_text, (_BTN_TAKE_CX - tw // 2, _TAKE_COUNT_Y + 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.44, ptch_color, 1, cv2.LINE_AA)
+
     # Second row: OVL / EXIT LOCAL  +  CLR
     if local_mode:
         _draw_button(panel, "EXIT LOCAL", _BTN_OVL_CX, _OC_BTN_CY,
@@ -338,24 +362,30 @@ def _draw_ctrl_panel(
     _draw_button(panel, clr_label, _BTN_CLR_CX, _OC_BTN_CY,
                  (55, 55, 90), _OC_BTN_W, _OC_BTN_H)
 
-    # Hint (global) / SEAL control (local)
+    # Bottom row: SEAL (new local) / CLR THIS PATCH (edit mode) / CLR PTCH or hint (global)
     if local_mode:
-        # − button
-        _draw_button(panel, "-", _SEAL_MINUS_CX, _SEAL_ROW_Y,
-                     (60, 60, 80), _SEAL_PBTN_W, _SEAL_PBTN_H)
-        # + button
-        _draw_button(panel, "+", _SEAL_PLUS_CX, _SEAL_ROW_Y,
-                     (60, 60, 80), _SEAL_PBTN_W, _SEAL_PBTN_H)
-        # Label + value
-        seal_text = f"SEAL: {local_seal}"
-        (tw, _), _ = cv2.getTextSize(seal_text, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1)
-        cv2.putText(panel, seal_text,
-                    (_CTRL_W // 2 - tw // 2, _SEAL_ROW_Y + 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, _AMBER, 1, cv2.LINE_AA)
+        if local_patch_idx is not None:
+            # Editing an existing patch — offer to delete it
+            _draw_button(panel, "CLR THIS PATCH", _CTRL_W // 2, _SEAL_ROW_Y,
+                         (40, 40, 120), 160, _SEAL_PBTN_H)
+        else:
+            # New region — show seal controls
+            _draw_button(panel, "-", _SEAL_MINUS_CX, _SEAL_ROW_Y,
+                         (60, 60, 80), _SEAL_PBTN_W, _SEAL_PBTN_H)
+            _draw_button(panel, "+", _SEAL_PLUS_CX, _SEAL_ROW_Y,
+                         (60, 60, 80), _SEAL_PBTN_W, _SEAL_PBTN_H)
+            seal_text = f"SEAL: {local_seal}"
+            (tw, _), _ = cv2.getTextSize(seal_text, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1)
+            cv2.putText(panel, seal_text,
+                        (_CTRL_W // 2 - tw // 2, _SEAL_ROW_Y + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, _AMBER, 1, cv2.LINE_AA)
+    elif patch_count > 0:
+        _draw_button(panel, "CLR PTCH", _CTRL_W // 2, _SEAL_ROW_Y,
+                     (60, 40, 40), 100, _SEAL_PBTN_H)
     else:
         hint = "Click edge panel to select area"
         (tw, _), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
-        cv2.putText(panel, hint, (_CTRL_W // 2 - tw // 2, _TOTAL_H - 8),
+        cv2.putText(panel, hint, (_CTRL_W // 2 - tw // 2, _SEAL_ROW_Y + 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.38, (80, 80, 80), 1, cv2.LINE_AA)
 
     return panel
@@ -384,23 +414,49 @@ def _add_border(image: np.ndarray, px: int, color=(255, 255, 255)) -> np.ndarray
                               cv2.BORDER_CONSTANT, value=color)
 
 
+def _compute_composite_inv_gray(
+    warped_display: np.ndarray,
+    sliders: list,
+    patches: list,
+) -> np.ndarray:
+    """
+    Compute a merged inv_gray from the global thresholds plus all committed
+    patches.
+
+    inv_gray convention: 255 = background, 0 = edge.
+    np.minimum combines two inv_gray maps with "either says edge → edge"
+    semantics, so each patch can only *add* edges — never remove them.
+    """
+    g_vals    = [sl.value for sl in sliders]
+    composite = compute_lab_edges(warped_display, *g_vals)
+    for patch in patches:
+        p_inv = compute_lab_edges(warped_display, *patch["thresholds"])
+        mask  = patch["mask"]
+        composite[mask > 0] = np.minimum(composite[mask > 0], p_inv[mask > 0])
+    return composite
+
+
+def _render_inv_gray(inv_gray: np.ndarray, color_idx: int) -> np.ndarray:
+    """Colorise an inv_gray map and add border — does not recompute edges."""
+    _name, edge_bgr, bg_bgr = _EDGE_COLORS[color_idx]
+    out = np.full((*inv_gray.shape, 3), bg_bgr, dtype=np.uint8)
+    out[inv_gray == 0] = edge_bgr
+    return _add_border(out, _BORDER)
+
+
 def _make_edge_panel(
     warped_display: np.ndarray,
     sliders: list,
     color_idx: int = 0,
+    patches: list | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return (bordered_BGR_panel, inv_gray_cache)."""
-    vals     = [sl.value for sl in sliders]
-    inv_gray = compute_lab_edges(warped_display, *vals)
-    _name, edge_bgr, bg_bgr = _EDGE_COLORS[color_idx]
-    out = np.full((*inv_gray.shape, 3), bg_bgr, dtype=np.uint8)
-    out[inv_gray == 0] = edge_bgr
-    return _add_border(out, _BORDER), inv_gray
+    """Return (bordered_BGR_panel, composite_inv_gray_cache)."""
+    inv_gray = _compute_composite_inv_gray(warped_display, sliders, patches or [])
+    return _render_inv_gray(inv_gray, color_idx), inv_gray
 
 
-def _make_overlay_panel(warped_display, sliders, color_idx):
-    vals     = [sl.value for sl in sliders]
-    inv_gray = compute_lab_edges(warped_display, *vals)
+def _make_overlay_panel(warped_display, sliders, color_idx, patches=None):
+    inv_gray = _compute_composite_inv_gray(warped_display, sliders, patches or [])
     _name, edge_bgr, _bg = _EDGE_COLORS[color_idx]
     out = warped_display.copy()
     out[inv_gray == 0] = edge_bgr
@@ -523,20 +579,22 @@ def _make_local_edge_panel(
     local_sliders: list,
     local_mask: np.ndarray,
     color_idx: int,
+    patches: list | None = None,
 ) -> np.ndarray:
     """
     Composite edge panel for local mode:
+      • Outside selection → global + committed patches, dimmed to 35 %
       • Inside selection  → local Lab thresholds, full brightness
-      • Outside selection → global Lab thresholds, dimmed to 35 %
       • Selection boundary → 2-px amber ring
-      • Top banner → amber bar: "LOCAL MODE — Esc or click outside to exit"
+      • Top banner → amber bar
     """
-    g_vals = [sl.value for sl in global_sliders]
-    l_vals = [sl.value for sl in local_sliders]
-    global_inv = compute_lab_edges(warped_display, *g_vals)
-    local_inv  = compute_lab_edges(warped_display, *l_vals)
+    # Outside: full composite (global + patches), dimmed
+    outside_inv = _compute_composite_inv_gray(warped_display, global_sliders, patches or [])
 
-    merged = global_inv.copy()
+    l_vals    = [sl.value for sl in local_sliders]
+    local_inv = compute_lab_edges(warped_display, *l_vals)
+
+    merged = outside_inv.copy()
     merged[local_mask > 0] = local_inv[local_mask > 0]
 
     _name, edge_bgr, bg_bgr = _EDGE_COLORS[color_idx]
@@ -590,7 +648,35 @@ def _make_zoom_panel(
 # Local mode transitions
 # ---------------------------------------------------------------------------
 
+def _make_local_sliders_from_thresholds(thresholds: tuple) -> list:
+    """Create local sliders initialised from specific threshold values."""
+    return [
+        _Slider(
+            label   = _LOCAL_SLIDER_META[i][0],
+            min_val = defn[1],
+            max_val = defn[2],
+            value   = max(defn[1], min(defn[2], thresholds[i])),
+            color   = _LOCAL_SLIDER_META[i][1],
+        )
+        for i, defn in enumerate(_SLIDER_DEFS)
+    ]
+
+
 def _enter_local_mode(state: _EdgemapState, disp_x: int, disp_y: int) -> None:
+    """Enter local mode, either editing an existing patch or creating a new region.
+
+    If the click lands inside an existing patch's mask, that patch is opened
+    for editing (its thresholds pre-loaded into the local sliders).  Otherwise
+    a new region is flood-filled from the click point.
+    """
+    # Check from newest patch backward so the most recent one takes priority
+    for i in range(len(state.patches) - 1, -1, -1):
+        patch = state.patches[i]
+        if patch["mask"][disp_y, disp_x] > 0:
+            _enter_patch_edit_mode(state, i)
+            return
+
+    # No existing patch hit — create a new region
     if state.inv_gray_cache is None:
         return
     mask = _flood_fill_region(state.inv_gray_cache, disp_x, disp_y,
@@ -603,6 +689,27 @@ def _enter_local_mode(state: _EdgemapState, disp_x: int, disp_y: int) -> None:
     state.local_seed_disp = (disp_x, disp_y)
     state.local_sliders   = _make_local_sliders(state.sliders)
     state.local_init_vals = [sl.value for sl in state.local_sliders]
+    state.local_patch_idx = None
+    state.local_mode      = True
+    state.local_dirty     = True
+
+
+def _enter_patch_edit_mode(state: _EdgemapState, patch_idx: int) -> None:
+    """Open an existing committed patch for editing.
+
+    The patch's mask is reused directly (no new flood fill), and its saved
+    thresholds seed the local sliders.  RESET restores to those saved values.
+    ESC discards changes and leaves the patch unchanged.
+    EXIT LOCAL / L replaces the patch with the edited version.
+    CLR THIS PATCH deletes it entirely.
+    """
+    patch = state.patches[patch_idx]
+    state.local_mask      = patch["mask"].copy()
+    state.local_bbox      = patch["bbox"]
+    state.local_seed_disp = None   # no seed — mask already defined
+    state.local_sliders   = _make_local_sliders_from_thresholds(patch["thresholds"])
+    state.local_init_vals = list(patch["thresholds"])
+    state.local_patch_idx = patch_idx
     state.local_mode      = True
     state.local_dirty     = True
 
@@ -632,11 +739,123 @@ def _exit_local_mode(state: _EdgemapState) -> None:
     state.local_mask      = None
     state.local_bbox      = None
     state.local_seed_disp = None
+    state.local_patch_idx = None
     state.local_sliders   = []
     state.local_init_vals = []
     state.local_drag_idx  = None
     state.local_edge_panel = None
     state.local_zoom_panel = None
+
+
+def _commit_local_patch(state: _EdgemapState) -> None:
+    """Bake current local region into the patches list.
+
+    When editing an existing patch (local_patch_idx is set), the patch is
+    replaced in-place.  When creating a new region, it is appended.
+    No-ops if thresholds are unchanged (accidental entry).
+    """
+    if state.local_mask is None or not state.local_sliders:
+        return
+    local_vals  = tuple(sl.value for sl in state.local_sliders)
+    global_vals = tuple(sl.value for sl in state.sliders)
+
+    # When editing an existing patch, compare against the patch's original
+    # thresholds (not global), so a change from the patch default is captured.
+    if state.local_patch_idx is not None:
+        original_vals = tuple(state.local_init_vals)
+        if local_vals == original_vals:
+            return   # unchanged — nothing to do
+    else:
+        if local_vals == global_vals:
+            return   # new region with no changes — skip
+
+    h, w = state.warped_display.shape[:2]
+    new_patch: dict = {
+        "mask":       state.local_mask.copy(),
+        "thresholds": local_vals,
+        "bbox":       state.local_bbox,
+    }
+    if state.local_seed_disp is not None:
+        sx, sy = state.local_seed_disp
+        new_patch["seed_norm"] = (sx / max(1, w), sy / max(1, h))
+        new_patch["seal"]      = state.local_seal
+    elif state.local_patch_idx is not None:
+        # Preserve original seed_norm and seal from the patch being edited
+        orig = state.patches[state.local_patch_idx]
+        new_patch["seed_norm"] = orig.get("seed_norm")
+        new_patch["seal"]      = orig.get("seal", _SEAL_DEFAULT)
+
+    if state.local_patch_idx is not None:
+        state.patches[state.local_patch_idx] = new_patch
+    else:
+        state.patches.append(new_patch)
+
+
+def _patches_to_session_data(patches: list) -> list:
+    """Convert state.patches to a JSON-serialisable list (no numpy arrays).
+
+    Each entry:
+        seed_norm   – (x/w, y/h) in display space, resolution-independent
+        seal        – gap-close radius used when the patch was created
+        thresholds  – (l_lo, l_hi, a_lo, a_hi, b_lo, b_hi)
+    """
+    out = []
+    for p in patches:
+        sn = p.get("seed_norm")
+        if sn is None:
+            continue
+        out.append({
+            "seed_norm":  [round(sn[0], 6), round(sn[1], 6)],
+            "seal":       int(p.get("seal", _SEAL_DEFAULT)),
+            "thresholds": list(p["thresholds"]),
+        })
+    return out
+
+
+def _restore_patches_from_session(
+    warped_display: np.ndarray,
+    patches_data: list,
+    global_sliders: list,
+) -> list:
+    """Reconstruct patch masks from saved session data.
+
+    The flood fill is re-run from the stored normalised seed using the stored
+    seal value.  Because the same global thresholds (and therefore the same
+    edge map) are restored on re-entry, the masks are deterministically
+    reproduced.
+
+    Returns a list of patch dicts ready to assign to state.patches.
+    """
+    if not patches_data:
+        return []
+
+    g_vals   = [sl.value for sl in global_sliders]
+    inv_gray = compute_lab_edges(warped_display, *g_vals)
+    h, w     = warped_display.shape[:2]
+    restored = []
+
+    for pd in patches_data:
+        try:
+            nx, ny = pd["seed_norm"]
+            seal   = int(pd.get("seal", _SEAL_DEFAULT))
+            thresh = tuple(pd["thresholds"])
+            sx     = max(0, min(int(round(nx * w)), w - 1))
+            sy     = max(0, min(int(round(ny * h)), h - 1))
+            mask   = _flood_fill_region(inv_gray, sx, sy, seal_px=seal)
+            bbox   = _bbox_from_mask(mask)
+            if bbox is None:
+                continue
+            restored.append({
+                "mask":       mask,
+                "thresholds": thresh,
+                "bbox":       bbox,
+                "seed_norm":  (nx, ny),
+                "seal":       seal,
+            })
+        except Exception:
+            continue   # corrupt entry — skip silently
+
+    return restored
 
 
 # ---------------------------------------------------------------------------
@@ -667,6 +886,7 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
                 elif _hit_button(x, y, _BTN_DONE_CX, _BTN_CY):
                     state.done = True
                 elif _hit_button(x, y, _BTN_OVL_CX, _OC_BTN_CY, _OC_BTN_W, _OC_BTN_H):
+                    _commit_local_patch(state)
                     _exit_local_mode(state)
                     state.edges_dirty = True
                 elif _hit_button(x, y, _BTN_CLR_CX, _OC_BTN_CY, _OC_BTN_W, _OC_BTN_H):
@@ -674,12 +894,20 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
                     state.local_dirty = True
                 elif _hit_button(x, y, _SEAL_MINUS_CX, _SEAL_ROW_Y,
                                  _SEAL_PBTN_W, _SEAL_PBTN_H):
-                    state.local_seal = max(_SEAL_MIN, state.local_seal - 1)
-                    _rerun_flood_fill(state)
+                    if state.local_patch_idx is None:   # SEAL only for new regions
+                        state.local_seal = max(_SEAL_MIN, state.local_seal - 1)
+                        _rerun_flood_fill(state)
                 elif _hit_button(x, y, _SEAL_PLUS_CX, _SEAL_ROW_Y,
                                  _SEAL_PBTN_W, _SEAL_PBTN_H):
-                    state.local_seal = min(_SEAL_MAX, state.local_seal + 1)
-                    _rerun_flood_fill(state)
+                    if state.local_patch_idx is None:
+                        state.local_seal = min(_SEAL_MAX, state.local_seal + 1)
+                        _rerun_flood_fill(state)
+                elif _hit_button(x, y, _CTRL_W // 2, _SEAL_ROW_Y, 160, _SEAL_PBTN_H):
+                    # CLR THIS PATCH button (only shown in patch-edit mode)
+                    if state.local_patch_idx is not None:
+                        del state.patches[state.local_patch_idx]
+                        _exit_local_mode(state)
+                        state.edges_dirty = True
             else:
                 for i, sl in enumerate(state.sliders):
                     ty = _track_y(i)
@@ -689,6 +917,7 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
                 if _hit_button(x, y, _BTN_RESET_CX, _BTN_CY):
                     for sl, iv in zip(state.sliders, state.initial_values):
                         sl.value = iv
+                    state.patches.clear()
                     state.edges_dirty = True
                 elif _hit_button(x, y, _BTN_TAKE_CX, _BTN_CY):
                     _do_take(state)
@@ -700,6 +929,10 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
                 elif _hit_button(x, y, _BTN_CLR_CX, _OC_BTN_CY, _OC_BTN_W, _OC_BTN_H):
                     state.color_idx   = (state.color_idx + 1) % len(_EDGE_COLORS)
                     state.edges_dirty = True
+                elif (state.patches and
+                      _hit_button(x, y, _CTRL_W // 2, _SEAL_ROW_Y, 100, _SEAL_PBTN_H)):
+                    state.patches.clear()
+                    state.edges_dirty = True
 
         elif on_edge_panel:
             # ---- Edge panel click ---------------------------------------- #
@@ -708,8 +941,9 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
             disp_y = max(0, min(y - _BORDER, dh - 1))
 
             if state.local_mode:
-                # Click outside selection → exit local mode
+                # Click outside selection → commit patch and exit local mode
                 if state.local_mask is not None and state.local_mask[disp_y, disp_x] == 0:
+                    _commit_local_patch(state)
                     _exit_local_mode(state)
                     state.edges_dirty = True
             else:
@@ -760,18 +994,23 @@ def _do_take(state: _EdgemapState) -> None:
     h_full, w_full = state.warped_full.shape[:2]
     h_disp, w_disp = state.warped_display.shape[:2]
 
+    # Base is always the composite — global + all committed patches
+    composite_base = _compute_composite_inv_gray(
+        state.warped_display, state.sliders, state.patches)
+
     if state.local_mode and state.local_mask is not None:
-        local_vals  = tuple(sl.value for sl in state.local_sliders)
-        global_disp = compute_lab_edges(state.warped_display, *global_vals)
-        local_disp  = compute_lab_edges(state.warped_display, *local_vals)
-        merged      = global_disp.copy()
-        merged[state.local_mask > 0] = local_disp[state.local_mask > 0]
+        local_vals = tuple(sl.value for sl in state.local_sliders)
+        local_inv  = compute_lab_edges(state.warped_display, *local_vals)
+        merged     = composite_base.copy()
+        merged[state.local_mask > 0] = np.minimum(
+            merged[state.local_mask > 0],
+            local_inv[state.local_mask > 0],
+        )
         full_edges = cv2.resize(merged, (w_full, h_full),
                                 interpolation=cv2.INTER_NEAREST)
-
         rx = w_full / max(1, w_disp)
         ry = h_full / max(1, h_disp)
-        sdx, sdy   = state.local_seed_disp
+        sdx, sdy        = state.local_seed_disp
         x0, y0, x1, y1 = state.local_bbox
         local_info: dict | None = {
             "seed":       (int(sdx * rx), int(sdy * ry)),
@@ -780,8 +1019,7 @@ def _do_take(state: _EdgemapState) -> None:
             "thresholds": local_vals,
         }
     else:
-        disp_edges = compute_lab_edges(state.warped_display, *global_vals)
-        full_edges = cv2.resize(disp_edges, (w_full, h_full),
+        full_edges = cv2.resize(composite_base, (w_full, h_full),
                                 interpolation=cv2.INTER_NEAREST)
         local_info = None
 
@@ -800,7 +1038,8 @@ def edit_edgemap(
     a_hi: int = 90,
     b_lo: int = 30,
     b_hi: int = 90,
-) -> list[tuple[np.ndarray, tuple, dict | None]]:
+    initial_patches_data: list | None = None,
+) -> tuple[list, list]:
     """
     Open the three-panel Lab edge-map editor.
 
@@ -823,8 +1062,10 @@ def edit_edgemap(
 
     Returns
     -------
-    list of (edges_full_res, global_thresholds, local_info)
-        One entry per TAKE.  Empty list if closed without taking.
+    (takes, patches_data)
+        takes        – list of (edges_full_res, global_thresholds, local_info)
+        patches_data – list of serialisable patch dicts for the session JSON
+                       (seed_norm, seal, thresholds — no numpy arrays)
     """
     initial_vals = [l_lo, l_hi, a_lo, a_hi, b_lo, b_hi]
     sliders = [
@@ -850,13 +1091,21 @@ def edit_edgemap(
         edges_dirty    = True,
     )
 
+    # Restore committed patches from a previous session if provided.
+    # Done before the window opens so the bootstrap frame already shows them.
+    if initial_patches_data:
+        state.patches = _restore_patches_from_session(
+            master_scaled, initial_patches_data, sliders)
+        if state.patches:
+            print(f"[INFO] Restored {len(state.patches)} local patch(es) from session")
+
     cv2.namedWindow(_EDGEMAP_WINDOW, cv2.WINDOW_NORMAL)
     cv2.setMouseCallback(_EDGEMAP_WINDOW, _edgemap_mouse, state)
 
     # Bootstrap — render once so HWND exists before maximising
     _boot_ctrl = _draw_ctrl_panel(state.sliders, 0, state.color_idx, state.overlay_on)
     state.edge_panel, state.inv_gray_cache = _make_edge_panel(
-        state.warped_display, state.sliders, state.color_idx)
+        state.warped_display, state.sliders, state.color_idx, patches=[])
     state.edges_dirty = False
     _bt_h = max(_boot_ctrl.shape[0], state.edge_panel.shape[0], master_panel.shape[0])
     cv2.imshow(_EDGEMAP_WINDOW, np.hstack([
@@ -873,16 +1122,18 @@ def edit_edgemap(
             # Rebuild panels when dirty
             if state.edges_dirty and not state.local_mode:
                 state.edge_panel, state.inv_gray_cache = _make_edge_panel(
-                    state.warped_display, state.sliders, state.color_idx)
+                    state.warped_display, state.sliders, state.color_idx,
+                    patches=state.patches)
                 if state.overlay_on:
                     state.overlay_panel = _make_overlay_panel(
-                        state.warped_display, state.sliders, state.color_idx)
+                        state.warped_display, state.sliders, state.color_idx,
+                        patches=state.patches)
                 state.edges_dirty = False
 
             if state.local_dirty and state.local_mode:
                 state.local_edge_panel = _make_local_edge_panel(
                     state.warped_display, state.sliders, state.local_sliders,
-                    state.local_mask, state.color_idx)
+                    state.local_mask, state.color_idx, patches=state.patches)
                 state.local_zoom_panel = _make_zoom_panel(
                     state.warped_display, state.local_bbox)
                 state.local_dirty = False
@@ -893,6 +1144,8 @@ def edit_edgemap(
                 local_mode=state.local_mode,
                 local_sliders=state.local_sliders if state.local_mode else None,
                 local_seal=state.local_seal,
+                patch_count=len(state.patches),
+                local_patch_idx=state.local_patch_idx,
             )
             if state.local_mode:
                 mid_panel   = state.local_edge_panel if state.local_edge_panel is not None else state.edge_panel
@@ -924,7 +1177,7 @@ def edit_edgemap(
                         sl.value = iv
                     state.edges_dirty = True
 
-            elif key == 27:           # Esc
+            elif key == 27:           # Esc — discard local work, no commit
                 if state.local_mode:
                     _exit_local_mode(state)
                     state.edges_dirty = True
@@ -933,6 +1186,7 @@ def edit_edgemap(
 
             elif key in (ord("l"), ord("L")):
                 if state.local_mode:
+                    _commit_local_patch(state)
                     _exit_local_mode(state)
                     state.edges_dirty = True
 
@@ -954,4 +1208,4 @@ def edit_edgemap(
     finally:
         cv2.destroyWindow(_EDGEMAP_WINDOW)
 
-    return state.takes
+    return state.takes, _patches_to_session_data(state.patches)

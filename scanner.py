@@ -701,8 +701,9 @@ def process_image(
 
         # --- Edge-map session (--edgemap) ---
         edgemap_takes: list = []
+        patches_data:  list = []
         if cfg.edgemap:
-            edgemap_takes = edit_edgemap(
+            edgemap_takes, patches_data = edit_edgemap(
                 warped,
                 l_lo=cfg.canny_lo,
                 l_hi=cfg.canny_hi,
@@ -747,7 +748,7 @@ def process_image(
                 cfg.lab_b_lo, cfg.lab_b_hi,
             ),
             takes              = takes_data,
-            local_regions      = [],
+            local_regions      = patches_data,
         )
         save_session(sess_path, session)
         print(f"[INFO] Session saved: {sess_path.name}")
@@ -842,11 +843,12 @@ def process_from_master(
         warped = load_image(master_path)
 
         # --- Edge-map session ---
-        new_takes = edit_edgemap(
+        new_takes, new_patches_data = edit_edgemap(
             warped,
             l_lo=seed["l_lo"], l_hi=seed["l_hi"],
             a_lo=seed["a_lo"], a_hi=seed["a_hi"],
             b_lo=seed["b_lo"], b_hi=seed["b_hi"],
+            initial_patches_data=existing.local_regions if existing else None,
         )
 
         if new_takes:
@@ -858,11 +860,15 @@ def process_from_master(
             new_records = []
             print("[INFO] Edge map session closed — no new edge files written.")
 
+        # Merge patches: keep prior ones, add/update with any new ones.
+        # Simple strategy: append new patches (re-entry may refine areas).
+        prior_patches = existing.local_regions if existing else []
+        merged_patches = prior_patches + new_patches_data
+
         # --- Update session ---
         prior_takes   = existing.takes        if existing else []
         corners_full  = existing.corners_full if existing else []
         init_thresh   = existing.initial_thresholds if existing else seed
-        local_regions = existing.local_regions if existing else []
         source_path   = existing.source_path  if existing else str(master_path.resolve())
 
         updated_session = SessionData(
@@ -873,7 +879,7 @@ def process_from_master(
             corners_full       = corners_full,
             initial_thresholds = init_thresh,
             takes              = prior_takes + new_records,
-            local_regions      = local_regions,
+            local_regions      = merged_patches,
         )
         save_session(sess_path, updated_session)
         print(f"[INFO] Session updated: {sess_path.name}  "
