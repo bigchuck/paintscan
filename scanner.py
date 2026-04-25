@@ -580,15 +580,17 @@ def _write_edge_takes(
 ) -> list[dict]:
     """Write edge JPEG + 600px + overlay PNG for each take.
 
-    *start_index* lets re-entry sessions continue numbering from where the
-    previous session left off (e.g. 3, 4, 5 …) rather than overwriting
-    existing files.
+    *takes* entries are 3-tuples: (edges_full, global_thresholds, local_info)
+    where *local_info* is None for global-only takes or a dict with keys
+    ``seed``, ``bbox``, and ``thresholds`` for local-region takes.
 
-    Returns a list of threshold dicts (one per take) ready to be stored in
-    the session JSON.
+    *start_index* lets re-entry sessions continue numbering (3, 4, 5 …)
+    rather than overwriting existing files.
+
+    Returns a list of take-record dicts ready to be stored in the session JSON.
     """
     take_records: list[dict] = []
-    for offset, (edges_full, thresholds) in enumerate(takes):
+    for offset, (edges_full, thresholds, local_info) in enumerate(takes):
         i              = start_index + offset
         edges_path     = out_dir / f"{stem}_edges_{i}.jpg"
         edges_600_path = out_dir / f"{stem}_edges_{i}_600.jpg"
@@ -600,13 +602,31 @@ def _write_edge_takes(
         edges_bgr = cv2.cvtColor(edges_full, cv2.COLOR_GRAY2BGR)
         cv2.imwrite(str(overlay_path), edges_bgr)
 
+        local_tag = ""
+        if local_info:
+            s = local_info["seed"]
+            b = local_info["bbox"]
+            local_tag = f"  local seed=({s[0]},{s[1]}) bbox=({b[0]},{b[1]},{b[2]},{b[3]})"
+
         print(
             f"[INFO] Edge map {i} saved — "
             f"L:{thresholds[0]}/{thresholds[1]}  "
             f"a:{thresholds[2]}/{thresholds[3]}  "
             f"b:{thresholds[4]}/{thresholds[5]}"
+            f"{local_tag}"
         )
-        take_records.append({"index": i, **_thresholds_dict(*thresholds)})
+
+        record: dict = {"index": i, **_thresholds_dict(*thresholds)}
+        if local_info:
+            record["local_region"] = {
+                "seed":       list(local_info["seed"]),
+                "bbox":       list(local_info["bbox"]),
+                "thresholds": list(local_info["thresholds"]),
+            }
+        else:
+            record["local_region"] = None
+
+        take_records.append(record)
 
     return take_records
 
@@ -701,8 +721,18 @@ def process_image(
         sess_path = session_path_for(out_dir, stem)
 
         takes_data = [
-            {"index": i, **_thresholds_dict(*thresholds)}
-            for i, (_edges, thresholds) in enumerate(edgemap_takes, start=1)
+            {
+                "index": i,
+                **_thresholds_dict(*thresholds),
+                "local_region": (
+                    {
+                        "seed":       list(li["seed"]),
+                        "bbox":       list(li["bbox"]),
+                        "thresholds": list(li["thresholds"]),
+                    } if li else None
+                ),
+            }
+            for i, (_edges, thresholds, li) in enumerate(edgemap_takes, start=1)
         ]
 
         session = SessionData(
