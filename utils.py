@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import string
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
@@ -283,6 +285,108 @@ def compute_lab_edges(
         _canny(b_ch, b_lo, b_hi),
     )
     return cv2.bitwise_not(edges)
+
+# ---------------------------------------------------------------------------
+# Session persistence
+# ---------------------------------------------------------------------------
+
+SCHEMA_VERSION = 1
+
+
+@dataclass
+class SessionData:
+    """Complete record of one image's processing session.
+
+    Stored as ``{stem}_session.json`` in the output directory.  Written only
+    after a successful acceptance (corner edit + optional edge-map takes) so
+    that a missing file unambiguously means "not yet processed".
+    """
+    schema_version:     int
+    timestamp:          str           # ISO-8601, local time
+    source_path:        str           # absolute path to the original photo
+    output_stem:        str           # e.g. "SA221a"
+    corners_full:       list          # [[x,y]×4] in full-resolution pixels
+    initial_thresholds: dict          # l_lo/l_hi/a_lo/a_hi/b_lo/b_hi seed values
+    takes:              list          # one dict per Take, keys: index + threshold names
+    local_regions:      list = field(default_factory=list)   # reserved
+
+
+def _thresholds_dict(
+    l_lo: int, l_hi: int,
+    a_lo: int, a_hi: int,
+    b_lo: int, b_hi: int,
+) -> dict:
+    return {
+        "l_lo": l_lo, "l_hi": l_hi,
+        "a_lo": a_lo, "a_hi": a_hi,
+        "b_lo": b_lo, "b_hi": b_hi,
+    }
+
+
+def save_session(session_path: Path, data: SessionData) -> None:
+    """Serialise *data* to *session_path* as pretty-printed JSON."""
+    payload = {
+        "schema_version":     data.schema_version,
+        "timestamp":          data.timestamp,
+        "source_path":        data.source_path,
+        "output_stem":        data.output_stem,
+        "corners_full":       data.corners_full,
+        "initial_thresholds": data.initial_thresholds,
+        "takes":              data.takes,
+        "local_regions":      data.local_regions,
+    }
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(session_path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2)
+        fh.write("\n")
+
+
+def load_session(session_path: Path) -> SessionData | None:
+    """Load a session JSON from *session_path*.
+
+    Returns ``None`` — without raising — if the file does not exist or cannot
+    be parsed, so callers can treat a missing/corrupt file as "no session".
+    """
+    if not session_path.exists():
+        return None
+    try:
+        with open(session_path, "r", encoding="utf-8") as fh:
+            d = json.load(fh)
+        return SessionData(
+            schema_version     = int(d.get("schema_version", 1)),
+            timestamp          = str(d.get("timestamp", "")),
+            source_path        = str(d.get("source_path", "")),
+            output_stem        = str(d.get("output_stem", "")),
+            corners_full       = d.get("corners_full", []),
+            initial_thresholds = d.get("initial_thresholds", {}),
+            takes              = d.get("takes", []),
+            local_regions      = d.get("local_regions", []),
+        )
+    except Exception:
+        return None
+
+
+def session_path_for(out_dir: Path, stem: str) -> Path:
+    """Canonical location of a session file given output directory and stem."""
+    return out_dir / f"{stem}_session.json"
+
+
+def thresholds_from_session(
+    session: SessionData,
+    *,
+    prefer_last_take: bool = True,
+) -> dict:
+    """Extract the most useful threshold dict from a loaded session.
+
+    When *prefer_last_take* is True (the default) and at least one Take was
+    recorded, return the last Take's thresholds — this is where the user
+    ended up and is the best seed for a re-entry session.  Fall back to
+    ``initial_thresholds`` if there are no Takes.
+    """
+    if prefer_last_take and session.takes:
+        return dict(session.takes[-1])   # shallow copy; caller may mutate
+    return dict(session.initial_thresholds)
+
 
 def draw_quad_print(
     image: np.ndarray,

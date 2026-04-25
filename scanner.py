@@ -14,6 +14,11 @@ from utils import (
     resize_for_preview,
     save_jpg,
     scale_points,
+    save_session,
+    session_path_for,
+    SessionData,
+    SCHEMA_VERSION,
+    _thresholds_dict,
 )
 
 
@@ -23,6 +28,12 @@ class ScanConfig:
     blur_ksize: int = 5
     canny_lo: int = 50
     canny_hi: int = 150
+    # Initial Lab edge-map thresholds (a* and b* channels).
+    # These seed the interactive editor sliders and are recorded in the session.
+    lab_a_lo: int = 30
+    lab_a_hi: int = 90
+    lab_b_lo: int = 30
+    lab_b_hi: int = 90
     contour_min_area_ratio: float = 0.03
     approx_epsilon_ratio: float = 0.02
     jpg_quality: int = 95
@@ -49,6 +60,7 @@ class ProcessResult:
     accepted: bool
     used_interactive: bool
     message: str = ""
+    session_path: Path | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -621,14 +633,19 @@ def process_image(
         stem = output_stem if output_stem is not None else path.stem
 
         # --- Edge-map session (--edgemap) ---
+        edgemap_takes: list = []
         if cfg.edgemap:
-            takes = edit_edgemap(
+            edgemap_takes = edit_edgemap(
                 warped,
                 l_lo=cfg.canny_lo,
                 l_hi=cfg.canny_hi,
+                a_lo=cfg.lab_a_lo,
+                a_hi=cfg.lab_a_hi,
+                b_lo=cfg.lab_b_lo,
+                b_hi=cfg.lab_b_hi,
             )
-            if takes:
-                for i, (edges_full, thresholds) in enumerate(takes, start=1):
+            if edgemap_takes:
+                for i, (edges_full, thresholds) in enumerate(edgemap_takes, start=1):
                     edges_path     = out_dir / f"{stem}_edges_{i}.jpg"
                     edges_600_path = out_dir / f"{stem}_edges_{i}_600.jpg"
                     overlay_path   = out_dir / f"{stem}_print_overlay_{i}.png"
@@ -647,6 +664,35 @@ def process_image(
                     )
             else:
                 print("[INFO] Edge map session closed — no edge files written.")
+
+        # --- Session file ---
+        from datetime import datetime as _dt
+        sess_path = session_path_for(out_dir, stem)
+
+        takes_data = [
+            {
+                "index": i,
+                **_thresholds_dict(*thresholds),
+            }
+            for i, (_edges, thresholds) in enumerate(edgemap_takes, start=1)
+        ]
+
+        session = SessionData(
+            schema_version     = SCHEMA_VERSION,
+            timestamp          = _dt.now().isoformat(timespec="seconds"),
+            source_path        = str(path.resolve()),
+            output_stem        = stem,
+            corners_full       = corners_full.tolist(),
+            initial_thresholds = _thresholds_dict(
+                cfg.canny_lo, cfg.canny_hi,
+                cfg.lab_a_lo, cfg.lab_a_hi,
+                cfg.lab_b_lo, cfg.lab_b_hi,
+            ),
+            takes              = takes_data,
+            local_regions      = [],
+        )
+        save_session(sess_path, session)
+        print(f"[INFO] Session saved: {sess_path.name}")
 
         # --- Debug overlays ---
         if cfg.debug:
@@ -677,6 +723,7 @@ def process_image(
             confidence=initial_score, method=initial_method,
             accepted=True, used_interactive=used_interactive,
             message="OK",
+            session_path=sess_path,
         )
 
     except Exception as e:

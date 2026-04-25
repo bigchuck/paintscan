@@ -171,8 +171,9 @@ def _print_result(res: ProcessResult, output_stem: str | None) -> None:
             if res.confidence is not None
             else f"method={res.method}"
         )
-        stem_info = f" [{output_stem}]" if output_stem else ""
-        print(f"[OK]   {src} -> {label}  ({method_info}){stem_info}")
+        stem_info    = f" [{output_stem}]" if output_stem else ""
+        session_info = f"  session={res.session_path.name}" if res.session_path else ""
+        print(f"[OK]   {src} -> {label}  ({method_info}){stem_info}{session_info}")
     else:
         print(f"[FAIL] {src} -> {res.message}")
 
