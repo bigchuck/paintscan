@@ -574,40 +574,49 @@ def save_master_and_derivatives(
 def _write_edge_takes(
     takes: list,
     stem: str,
-    out_dir: Path,
+    out_dir,                 # pathlib.Path
     jpg_quality: int,
-    start_index: int = 1,
 ) -> list[dict]:
-    """Write edge JPEG + 600px + overlay PNG for each take.
-
-    *takes* entries are 3-tuples: (edges_full, global_thresholds, local_info)
-    where *local_info* is None for global-only takes or a dict with keys
-    ``seed``, ``bbox``, and ``thresholds`` for local-region takes.
-
-    *start_index* lets re-entry sessions continue numbering (3, 4, 5 …)
-    rather than overwriting existing files.
-
-    Returns a list of take-record dicts ready to be stored in the session JSON.
+    """Write JPEG edge files for new user Takes (index >= 1).
+ 
+    Skips Take 0 — it is the auto-recorded initial state and is never written
+    to disk as an edge file, though it *is* stored in the session JSON.
+ 
+    Returns a list of session-record dicts for inclusion in SessionData.takes.
     """
+    import cv2                          # already imported at top of scanner.py
     take_records: list[dict] = []
-    for offset, (edges_full, thresholds, local_info) in enumerate(takes):
-        i              = start_index + offset
+ 
+    for take in takes:
+        i = take["index"]
+        if i == 0:
+            continue                    # Take 0: JSON-only, no edge file
+ 
+        edges_full  = take["edges_full"]
+        thresholds  = take["global_thresholds"]
+        local_info  = take["local_info"]
+        seeded_from = take["seeded_from"]
+        base_image  = take["base_image"]
+ 
+        # Three output artefacts per Take (same filenames as before)
         edges_path     = out_dir / f"{stem}_edges_{i}.jpg"
         edges_600_path = out_dir / f"{stem}_edges_{i}_600.jpg"
         overlay_path   = out_dir / f"{stem}_print_overlay_{i}.png"
-
-        save_jpg(edges_path,     edges_full,                         quality=jpg_quality)
-        save_jpg(edges_600_path, resize_to_max_dim(edges_full, 600), quality=jpg_quality)
-
+ 
+        save_jpg(edges_path,     edges_full,                          quality=jpg_quality)
+        save_jpg(edges_600_path, resize_to_max_dim(edges_full, 600),  quality=jpg_quality)
         edges_bgr = cv2.cvtColor(edges_full, cv2.COLOR_GRAY2BGR)
         cv2.imwrite(str(overlay_path), edges_bgr)
-
+ 
         local_tag = ""
         if local_info:
             s = local_info["seed"]
             b = local_info["bbox"]
-            local_tag = f"  local seed=({s[0]},{s[1]}) bbox=({b[0]},{b[1]},{b[2]},{b[3]})"
-
+            local_tag = (
+                f"  local seed=({s[0]},{s[1]}) "
+                f"bbox=({b[0]},{b[1]},{b[2]},{b[3]})"
+            )
+ 
         print(
             f"[INFO] Edge map {i} saved — "
             f"L:{thresholds[0]}/{thresholds[1]}  "
@@ -615,21 +624,24 @@ def _write_edge_takes(
             f"b:{thresholds[4]}/{thresholds[5]}"
             f"{local_tag}"
         )
-
-        record: dict = {"index": i, **_thresholds_dict(*thresholds)}
-        if local_info:
-            record["local_region"] = {
-                "seed":       list(local_info["seed"]),
-                "bbox":       list(local_info["bbox"]),
-                "thresholds": list(local_info["thresholds"]),
-            }
-        else:
-            record["local_region"] = None
-
+ 
+        record: dict = {
+            "index":       i,
+            **_thresholds_dict(*thresholds),
+            "seeded_from": seeded_from,
+            "base_image":  base_image,
+            "local_region": (
+                {
+                    "seed":       list(local_info["seed"]),
+                    "bbox":       list(local_info["bbox"]),
+                    "thresholds": list(local_info["thresholds"]),
+                }
+                if local_info else None
+            ),
+        }
         take_records.append(record)
-
+ 
     return take_records
-
 
 # ---------------------------------------------------------------------------
 # Main processing entry point
@@ -645,6 +657,8 @@ def process_image(
     cfg: ScanConfig,
     output_stem: str | None = None,
 ) -> ProcessResult:
+    from datetime import datetime as _dt
+
     try:
         image_full  = load_image(path)
         image_small, scale = resize_for_preview(image_full, cfg.downscale_max_dim)
@@ -703,38 +717,40 @@ def process_image(
         edgemap_takes: list = []
         patches_data:  list = []
         if cfg.edgemap:
+            # --- Edge-map session (--edgemap) ---
             edgemap_takes, patches_data = edit_edgemap(
                 warped,
-                l_lo=cfg.canny_lo,
-                l_hi=cfg.canny_hi,
-                a_lo=cfg.lab_a_lo,
-                a_hi=cfg.lab_a_hi,
-                b_lo=cfg.lab_b_lo,
-                b_hi=cfg.lab_b_hi,
+                l_lo=cfg.canny_lo,   l_hi=cfg.canny_hi,
+                a_lo=cfg.lab_a_lo,   a_hi=cfg.lab_a_hi,
+                b_lo=cfg.lab_b_lo,   b_hi=cfg.lab_b_hi,
+                # No initial_takes_data — fresh session; Take 0 auto-created inside
             )
-            if edgemap_takes:
-                _write_edge_takes(edgemap_takes, stem, out_dir, cfg.jpg_quality, start_index=1)
+            # Write edge files only for user Takes (index >= 1)
+            user_takes = [t for t in edgemap_takes if t["index"] > 0]
+            if user_takes:
+                _write_edge_takes(user_takes, stem, out_dir, cfg.jpg_quality)
             else:
                 print("[INFO] Edge map session closed — no edge files written.")
-
-        # --- Session file ---
-        from datetime import datetime as _dt
-        sess_path = session_path_for(out_dir, stem)
-
-        takes_data = [
-            {
-                "index": i,
-                **_thresholds_dict(*thresholds),
+ 
+        # Build session take records — includes Take 0 so the filmstrip
+        # can reconstruct it on re-entry without recomputing from thresholds.
+        takes_data: list[dict] = []
+        for t in edgemap_takes:
+            rec: dict = {
+                "index":       t["index"],
+                **_thresholds_dict(*t["global_thresholds"]),
+                "seeded_from": t["seeded_from"],
+                "base_image":  t["base_image"],
                 "local_region": (
                     {
-                        "seed":       list(li["seed"]),
-                        "bbox":       list(li["bbox"]),
-                        "thresholds": list(li["thresholds"]),
-                    } if li else None
+                        "seed":       list(t["local_info"]["seed"]),
+                        "bbox":       list(t["local_info"]["bbox"]),
+                        "thresholds": list(t["local_info"]["thresholds"]),
+                    }
+                    if t["local_info"] else None
                 ),
             }
-            for i, (_edges, thresholds, li) in enumerate(edgemap_takes, start=1)
-        ]
+            takes_data.append(rec)
 
         session = SessionData(
             schema_version     = SCHEMA_VERSION,
@@ -750,6 +766,7 @@ def process_image(
             takes              = takes_data,
             local_regions      = patches_data,
         )
+        sess_path = session_path_for(out_dir, stem)
         save_session(sess_path, session)
         print(f"[INFO] Session saved: {sess_path.name}")
 
@@ -798,110 +815,96 @@ def process_image(
 # Re-entry from master
 # ---------------------------------------------------------------------------
 
-def process_from_master(
-    master_path: Path,
-    out_dir: Path,
-    cfg: ScanConfig,
-) -> ProcessResult:
-    """Open an already-warped ``*_master.jpg`` directly in the Lab edge-map
-    editor, bypassing detection and the corner editor entirely.
-
-    Behaviour
-    ---------
-    * The output stem is inferred by stripping ``_master`` from the filename.
-    * If a ``{stem}_session.json`` exists in *out_dir* its last-take thresholds
-      seed the sliders; otherwise the cfg Lab defaults are used.
-    * New takes are **appended** to the existing session (index continues from
-      the last recorded take) so history is preserved across re-entry sessions.
-    * The session JSON is always updated on return — even when no new takes are
-      made, the timestamp is refreshed to record the review visit.
+def process_from_master(master_path, cfg) -> None:
+    """Re-enter the edge-map session for an already-processed image.
+ 
+    Loads the existing session (corners, thresholds, prior takes, patches),
+    re-opens the interactive editor with the filmstrip pre-populated, then
+    appends any new takes to the session JSON.
     """
+    from pathlib import Path
     from datetime import datetime as _dt
-
-    try:
-        stem      = stem_from_master(master_path)
-        sess_path = session_path_for(out_dir, stem)
-
-        # --- Load existing session (if any) ---
-        existing = load_session(sess_path)
-
-        if existing is not None:
-            seed = thresholds_from_session(existing, prefer_last_take=True)
-            next_index = (existing.takes[-1]["index"] + 1) if existing.takes else 1
-            print(f"[INFO] Session restored from {sess_path.name}  "
-                  f"({len(existing.takes)} previous take(s))")
-        else:
-            seed = {
-                "l_lo": cfg.canny_lo,  "l_hi": cfg.canny_hi,
-                "a_lo": cfg.lab_a_lo,  "a_hi": cfg.lab_a_hi,
-                "b_lo": cfg.lab_b_lo,  "b_hi": cfg.lab_b_hi,
-            }
-            next_index = 1
-            print(f"[INFO] No session file found for {stem!r} — starting fresh")
-
-        # --- Load master image ---
-        warped = load_image(master_path)
-
-        # --- Edge-map session ---
-        new_takes, new_patches_data = edit_edgemap(
-            warped,
-            l_lo=seed["l_lo"], l_hi=seed["l_hi"],
-            a_lo=seed["a_lo"], a_hi=seed["a_hi"],
-            b_lo=seed["b_lo"], b_hi=seed["b_hi"],
-            initial_patches_data=existing.local_regions if existing else None,
-        )
-
-        if new_takes:
-            new_records = _write_edge_takes(
-                new_takes, stem, out_dir, cfg.jpg_quality,
-                start_index=next_index,
-            )
-        else:
-            new_records = []
-            print("[INFO] Edge map session closed — no new edge files written.")
-
-        # Merge patches: keep prior ones, add/update with any new ones.
-        # Simple strategy: append new patches (re-entry may refine areas).
-        prior_patches = existing.local_regions if existing else []
-        merged_patches = prior_patches + new_patches_data
-
-        # --- Update session ---
-        prior_takes   = existing.takes        if existing else []
-        corners_full  = existing.corners_full if existing else []
-        init_thresh   = existing.initial_thresholds if existing else seed
-        source_path   = existing.source_path  if existing else str(master_path.resolve())
-
-        updated_session = SessionData(
-            schema_version     = SCHEMA_VERSION,
-            timestamp          = _dt.now().isoformat(timespec="seconds"),
-            source_path        = source_path,
-            output_stem        = stem,
-            corners_full       = corners_full,
-            initial_thresholds = init_thresh,
-            takes              = prior_takes + new_records,
-            local_regions      = merged_patches,
-        )
-        save_session(sess_path, updated_session)
-        print(f"[INFO] Session updated: {sess_path.name}  "
-              f"(total takes: {len(updated_session.takes)})")
-
-        master_out = out_dir / f"{stem}_master.jpg"
-
-        return ProcessResult(
-            source           = master_path,
-            output_master    = master_out if master_out.exists() else None,
-            confidence       = None,
-            method           = "from-master",
-            accepted         = True,
-            used_interactive = True,
-            message          = "OK",
-            session_path     = sess_path,
-        )
-
-    except Exception as e:
-        return ProcessResult(
-            source=master_path, output_master=None,
-            confidence=None, method=None,
-            accepted=False, used_interactive=False,
-            message=f"ERROR: {e}",
-        )
+ 
+    master_path = Path(master_path)
+    out_dir     = master_path.parent
+    stem        = master_path.stem.replace("_master", "")
+    sess_path   = session_path_for(out_dir, stem)
+ 
+    if not sess_path.exists():
+        print(f"[ERROR] No session file found: {sess_path}")
+        return
+ 
+    existing = load_session(sess_path)
+    if existing is None:
+        print(f"[ERROR] Could not load session: {sess_path}")
+        return
+ 
+    print(
+        f"[INFO] Session restored from {sess_path.name}  "
+        f"({len(existing.takes)} previous take(s))"
+    )
+ 
+    warped = cv2.imread(str(master_path))
+    if warped is None:
+        print(f"[ERROR] Could not read master: {master_path}")
+        return
+ 
+    # Seed initial slider values from the last take, or from the session's
+    # initial_thresholds if no takes exist yet.
+    if existing.takes:
+        seed = existing.takes[-1]
+    else:
+        seed = existing.initial_thresholds
+ 
+    new_takes, new_patches_data = edit_edgemap(
+        warped,
+        l_lo=seed["l_lo"], l_hi=seed["l_hi"],
+        a_lo=seed["a_lo"], a_hi=seed["a_hi"],
+        b_lo=seed["b_lo"], b_hi=seed["b_hi"],
+        initial_patches_data=existing.local_regions if existing else None,
+        initial_takes_data=existing.takes if existing else None,   # ← NEW
+    )
+ 
+    # Write only genuinely new user takes (index >= 1, is_new=True inside interact)
+    user_new_takes = [t for t in new_takes if t["index"] > 0]
+    if user_new_takes:
+        new_records = _write_edge_takes(
+            user_new_takes, stem, out_dir, cfg.jpg_quality)
+    else:
+        new_records = []
+        print("[INFO] Edge map session closed — no new edge files written.")
+ 
+    # Build new-take session records from all new_takes
+    # (edit_edgemap only returns is_new=True takes, so this captures any new
+    # Take 0 from a fresh session, though for process_from_master Take 0 is
+    # always already in existing.takes)
+    new_records_full: list[dict] = []
+    for t in new_takes:
+        if t["index"] > 0:
+            # These were written to disk; use the records returned by _write_edge_takes
+            continue
+        # Only reaches here for a Take-0 edge case that shouldn't arise in re-entry
+        new_records_full.append({
+            "index":       t["index"],
+            **_thresholds_dict(*t["global_thresholds"]),
+            "seeded_from": t["seeded_from"],
+            "base_image":  t["base_image"],
+            "local_region": None,
+        })
+ 
+    prior_takes   = existing.takes if existing else []
+    all_takes     = prior_takes + new_records   # new_records from _write_edge_takes
+ 
+    from utils import SessionData, save_session
+    updated_session = SessionData(
+        schema_version    = existing.schema_version,
+        timestamp         = existing.timestamp,
+        source_path       = existing.source_path,
+        output_stem       = existing.output_stem,
+        corners_full      = existing.corners_full,
+        initial_thresholds= existing.initial_thresholds,
+        takes             = all_takes,
+        local_regions     = new_patches_data if new_patches_data else existing.local_regions,
+    )
+    save_session(updated_session, sess_path)
+    print(f"[INFO] Session updated: {sess_path.name}  ({len(all_takes)} total take(s))")
