@@ -337,7 +337,8 @@ class SessionData:
     corners_full:       list          # [[x,y]×4] in full-resolution pixels
     initial_thresholds: dict          # l_lo/l_hi/a_lo/a_hi/b_lo/b_hi seed values
     takes:              list          # one dict per Take, keys: index + threshold names
-    local_regions:      list = field(default_factory=list)   # reserved
+    local_regions:      list = field(default_factory=list)   # patches (seed_norm, seal, thresholds, patch_id, super_area_id)
+    super_areas:        list = field(default_factory=list)   # super-area records (super_area_id, thresholds, patch_ids)
 
 
 def _thresholds_dict(
@@ -363,6 +364,7 @@ def save_session(session_path: Path, data: SessionData) -> None:
         "initial_thresholds": data.initial_thresholds,
         "takes":              data.takes,
         "local_regions":      data.local_regions,
+        "super_areas":        data.super_areas,
     }
     session_path.parent.mkdir(parents=True, exist_ok=True)
     with open(session_path, "w", encoding="utf-8") as fh:
@@ -390,6 +392,7 @@ def load_session(session_path: Path) -> SessionData | None:
             initial_thresholds = d.get("initial_thresholds", {}),
             takes              = d.get("takes", []),
             local_regions      = d.get("local_regions", []),
+            super_areas        = d.get("super_areas", []),
         )
     except Exception:
         return None

@@ -716,9 +716,9 @@ def process_image(
         # --- Edge-map session (--edgemap) ---
         edgemap_takes: list = []
         patches_data:  list = []
+        super_areas_data: list = []
         if cfg.edgemap:
-            # --- Edge-map session (--edgemap) ---
-            edgemap_takes, patches_data = edit_edgemap(
+            edgemap_takes, patches_data, super_areas_data = edit_edgemap(
                 warped,
                 l_lo=cfg.canny_lo,   l_hi=cfg.canny_hi,
                 a_lo=cfg.lab_a_lo,   a_hi=cfg.lab_a_hi,
@@ -765,6 +765,7 @@ def process_image(
             ),
             takes              = takes_data,
             local_regions      = patches_data,
+            super_areas        = super_areas_data,
         )
         sess_path = session_path_for(out_dir, stem)
         save_session(sess_path, session)
@@ -856,13 +857,14 @@ def process_from_master(master_path, cfg) -> None:
     else:
         seed = existing.initial_thresholds
  
-    new_takes, new_patches_data = edit_edgemap(
+    new_takes, new_patches_data, new_super_areas_data = edit_edgemap(
         warped,
         l_lo=seed["l_lo"], l_hi=seed["l_hi"],
         a_lo=seed["a_lo"], a_hi=seed["a_hi"],
         b_lo=seed["b_lo"], b_hi=seed["b_hi"],
-        initial_patches_data=existing.local_regions if existing else None,
-        initial_takes_data=existing.takes if existing else None,   # ← NEW
+        initial_patches_data    = existing.local_regions if existing else None,
+        initial_takes_data      = existing.takes         if existing else None,
+        initial_super_areas_data= existing.super_areas   if existing else None,
     )
  
     # Write only genuinely new user takes (index >= 1, is_new=True inside interact)
@@ -904,7 +906,8 @@ def process_from_master(master_path, cfg) -> None:
         corners_full      = existing.corners_full,
         initial_thresholds= existing.initial_thresholds,
         takes             = all_takes,
-        local_regions     = new_patches_data if new_patches_data else existing.local_regions,
+        local_regions     = new_patches_data    if new_patches_data    else existing.local_regions,
+        super_areas       = new_super_areas_data if new_super_areas_data else existing.super_areas,
     )
     save_session(updated_session, sess_path)
     print(f"[INFO] Session updated: {sess_path.name}  ({len(all_takes)} total take(s))")

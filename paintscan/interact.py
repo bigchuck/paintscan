@@ -138,10 +138,13 @@ _OC_BTN_CY  = 820
 _BTN_OVL_CX = 75
 _BTN_CLR_CX = 220
 
-_TOTAL_H = 880   # extended by 30 px to fit the SEAL row
+_TOTAL_H = 916   # extended for MERGE button row
 
 # Amber accent for local mode (BGR)
 _AMBER: tuple = (0, 165, 255)
+
+# Green accent for merge mode (BGR)
+_MERGE_GREEN: tuple = (0, 180, 60)
 
 # SEAL row (local mode only) — gap-close control sits below OVL/CLR
 _SEAL_ROW_Y    = 856
@@ -152,6 +155,10 @@ _SEAL_PBTN_H   = 24
 _SEAL_MIN      = 0
 _SEAL_MAX      = 20
 _SEAL_DEFAULT  = 4    # bridges gaps up to ~8 px wide; raise for loose edge maps
+
+# Merge button row — sits below the SEAL row
+_MERGE_BTN_CY  = 892
+_MERGE_ADJ_PX  = 15   # dilation px for adjacency check — generous to handle thick Canny edges
 
 # --- Filmstrip constants ----------------------------------------------------
 _FILM_H       = 108   # total strip height below the main panels
@@ -192,6 +199,16 @@ _LOCAL_SLIDER_META: list[tuple] = [
     ("a* hi \u24db", ( 80, 220, 240)),
     ("b* lo \u24db", ( 40, 180, 255)),
     ("b* hi \u24db", ( 60, 200, 255)),
+]
+
+# Merge-mode slider label / handle colour variants (green family) — ⓜ = U+24DC
+_MERGE_SLIDER_META: list[tuple] = [
+    ("L* lo \u24dc", ( 50, 200,  50)),
+    ("L* hi \u24dc", ( 70, 220,  70)),
+    ("a* lo \u24dc", ( 50, 210, 150)),
+    ("a* hi \u24dc", ( 70, 230, 170)),
+    ("b* lo \u24dc", ( 50, 200, 210)),
+    ("b* hi \u24dc", ( 70, 220, 230)),
 ]
 
 
@@ -324,6 +341,18 @@ class _EdgemapState:
     main_panel_h:     int = 0   # pixel height of the main three-panel row (set each frame)
     window_w:         int = 0   # total window pixel width (set each frame)
 
+    # Phase 2 — super-areas and merge mode
+    super_areas:        list = field(default_factory=list)   # list of SA dicts
+    next_patch_id:      int  = 0    # monotonic; never reused
+    next_super_area_id: int  = 0    # monotonic; never reused
+    merge_mode:         bool = False
+    merge_active_sa_id: Optional[int] = None   # SA whose sliders are shown
+    merge_sliders:      list = field(default_factory=list)
+    merge_init_vals:    list = field(default_factory=list)
+    merge_drag_idx:     Optional[int] = None
+    merge_dirty:        bool = False
+    merge_edge_panel:   Optional[np.ndarray] = None
+
 
 # ---------------------------------------------------------------------------
 # Control panel drawing
@@ -339,11 +368,22 @@ def _draw_ctrl_panel(
     local_seal: int = _SEAL_DEFAULT,
     patch_count: int = 0,
     local_patch_idx: int | None = None,
+    merge_mode: bool = False,
+    merge_sliders: list | None = None,
+    merge_active_sa_id: int | None = None,
+    super_area_count: int = 0,
 ) -> np.ndarray:
     panel = np.full((_TOTAL_H, _CTRL_W, 3), 28, dtype=np.uint8)
 
     # Title bar
-    if local_mode:
+    if merge_mode:
+        if merge_active_sa_id is not None:
+            title_bg   = (0, 120, 0)
+            title_text = f"SUPER-AREA {merge_active_sa_id}"
+        else:
+            title_bg   = (0, 160, 60)
+            title_text = "MERGE MODE"
+    elif local_mode:
         if local_patch_idx is not None:
             title_bg   = (0, 80, 140)
             title_text = f"EDIT PATCH #{local_patch_idx + 1}"
@@ -357,7 +397,12 @@ def _draw_ctrl_panel(
     cv2.putText(panel, title_text, (10, 24),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1, cv2.LINE_AA)
 
-    active = local_sliders if (local_mode and local_sliders) else sliders
+    if merge_mode and merge_sliders and merge_active_sa_id is not None:
+        active = merge_sliders
+    elif local_mode and local_sliders:
+        active = local_sliders
+    else:
+        active = sliders
 
     for i, sl in enumerate(active):
         ty      = _track_y(i)
@@ -380,7 +425,7 @@ def _draw_ctrl_panel(
                     cv2.FONT_HERSHEY_SIMPLEX, 0.48, (190, 190, 190), 1, cv2.LINE_AA)
 
     # Main buttons
-    rst_col = (0, 100, 180) if local_mode else (90, 90, 30)
+    rst_col = _AMBER if local_mode else (_MERGE_GREEN if merge_mode else (90, 90, 30))
     _draw_button(panel, "RESET", _BTN_RESET_CX, _BTN_CY, rst_col, _BTN_W, _BTN_H)
     _draw_button(panel, "TAKE",  _BTN_TAKE_CX,  _BTN_CY, (35, 130, 35), _BTN_W, _BTN_H)
     _draw_button(panel, "DONE",  _BTN_DONE_CX,  _BTN_CY, (70,  70, 70), _BTN_W, _BTN_H)
@@ -404,10 +449,23 @@ def _draw_ctrl_panel(
     cv2.putText(panel, ptch_text, (_BTN_TAKE_CX - tw // 2, _TAKE_COUNT_Y + 18),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.44, ptch_color, 1, cv2.LINE_AA)
 
-    # Second row: OVL / EXIT LOCAL  +  CLR
+    # Super-area count
+    if super_area_count > 0:
+        sa_text  = f"super-areas: {super_area_count}"
+        sa_color = _MERGE_GREEN
+    else:
+        sa_text  = "super-areas: 0"
+        sa_color = (60, 60, 60)
+    (tw, _), _ = cv2.getTextSize(sa_text, cv2.FONT_HERSHEY_SIMPLEX, 0.40, 1)
+    cv2.putText(panel, sa_text, (_BTN_TAKE_CX - tw // 2, _TAKE_COUNT_Y + 34),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.40, sa_color, 1, cv2.LINE_AA)
+
+    # Second row: OVL / EXIT LOCAL / (merge mode: blank)  +  CLR
     if local_mode:
         _draw_button(panel, "EXIT LOCAL", _BTN_OVL_CX, _OC_BTN_CY,
                      _AMBER, _OC_BTN_W, _OC_BTN_H)
+    elif merge_mode:
+        pass   # no OVL button in merge mode — right panel is always master
     else:
         ovl_label = "OVL: ON " if overlay_on else "OVL: OFF"
         ovl_color = (35, 130, 35) if overlay_on else (60, 60, 60)
@@ -442,6 +500,19 @@ def _draw_ctrl_panel(
         cv2.putText(panel, hint, (_CTRL_W // 2 - tw // 2, _SEAL_ROW_Y + 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.38, (80, 80, 80), 1, cv2.LINE_AA)
 
+    # MERGE / EXIT MERGE row — always visible, below SEAL row
+    if merge_mode:
+        _draw_button(panel, "EXIT MERGE", _CTRL_W // 2, _MERGE_BTN_CY,
+                     (0, 100, 20), 160, _BTN_H)
+    elif patch_count >= 1:
+        _draw_button(panel, "MERGE", _CTRL_W // 2, _MERGE_BTN_CY,
+                     _MERGE_GREEN, 100, _BTN_H)
+    else:
+        hint2 = "Make patches to enable merge"
+        (tw, _), _ = cv2.getTextSize(hint2, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)
+        cv2.putText(panel, hint2, (_CTRL_W // 2 - tw // 2, _MERGE_BTN_CY + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (55, 55, 55), 1, cv2.LINE_AA)
+
     return panel
 
 
@@ -472,15 +543,25 @@ def _compute_composite_inv_gray(
     warped_display: np.ndarray,
     sliders: list,
     patches: list,
+    super_areas: list | None = None,
 ) -> np.ndarray:
     """
-    Compute a merged inv_gray from the global thresholds plus all committed patches.
-    inv_gray convention: 255 = background, 0 = edge.
+    Compute a merged inv_gray from global thresholds plus all committed patches.
+    Patches that belong to a super-area use the super-area's thresholds instead
+    of their own.  inv_gray convention: 255 = background, 0 = edge.
     """
     g_vals    = [sl.value for sl in sliders]
     composite = compute_lab_edges(warped_display, *g_vals)
+    sa_list   = super_areas or []
     for patch in patches:
-        p_inv = compute_lab_edges(warped_display, *patch["thresholds"])
+        # Resolve effective thresholds: SA overrides patch's own thresholds
+        sa_id  = patch.get("super_area_id")
+        if sa_id is not None:
+            sa = next((s for s in sa_list if s["super_area_id"] == sa_id), None)
+            thresh = sa["thresholds"] if sa else patch["thresholds"]
+        else:
+            thresh = patch["thresholds"]
+        p_inv = compute_lab_edges(warped_display, *thresh)
         mask  = patch["mask"]
         composite[mask > 0] = np.minimum(composite[mask > 0], p_inv[mask > 0])
     return composite
@@ -499,14 +580,15 @@ def _make_edge_panel(
     sliders: list,
     color_idx: int = 0,
     patches: list | None = None,
+    super_areas: list | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return (bordered_BGR_panel, composite_inv_gray_cache)."""
-    inv_gray = _compute_composite_inv_gray(warped_display, sliders, patches or [])
+    inv_gray = _compute_composite_inv_gray(warped_display, sliders, patches or [], super_areas)
     return _render_inv_gray(inv_gray, color_idx), inv_gray
 
 
-def _make_overlay_panel(warped_display, sliders, color_idx, patches=None):
-    inv_gray = _compute_composite_inv_gray(warped_display, sliders, patches or [])
+def _make_overlay_panel(warped_display, sliders, color_idx, patches=None, super_areas=None):
+    inv_gray = _compute_composite_inv_gray(warped_display, sliders, patches or [], super_areas)
     _name, edge_bgr, _bg = _EDGE_COLORS[color_idx]
     out = warped_display.copy()
     out[inv_gray == 0] = edge_bgr
@@ -701,9 +783,10 @@ def _make_local_edge_panel(
     local_mask: np.ndarray,
     color_idx: int,
     patches: list | None = None,
+    super_areas: list | None = None,
 ) -> np.ndarray:
     """Composite edge panel for local mode."""
-    outside_inv = _compute_composite_inv_gray(warped_display, global_sliders, patches or [])
+    outside_inv = _compute_composite_inv_gray(warped_display, global_sliders, patches or [], super_areas)
 
     l_vals    = [sl.value for sl in local_sliders]
     local_inv = compute_lab_edges(warped_display, *l_vals)
@@ -849,23 +932,32 @@ def _commit_local_patch(state: _EdgemapState) -> None:
             return
 
     h, w = state.warped_display.shape[:2]
-    new_patch: dict = {
-        "mask":       state.local_mask.copy(),
-        "thresholds": local_vals,
-        "bbox":       state.local_bbox,
-    }
-    if state.local_seed_disp is not None:
-        sx, sy = state.local_seed_disp
-        new_patch["seed_norm"] = (sx / max(1, w), sy / max(1, h))
-        new_patch["seal"]      = state.local_seal
-    elif state.local_patch_idx is not None:
-        orig = state.patches[state.local_patch_idx]
-        new_patch["seed_norm"] = orig.get("seed_norm")
-        new_patch["seal"]      = orig.get("seal", _SEAL_DEFAULT)
-
     if state.local_patch_idx is not None:
+        # Editing existing patch — preserve its identity fields
+        orig = state.patches[state.local_patch_idx]
+        new_patch: dict = {
+            "patch_id":      orig["patch_id"],
+            "super_area_id": orig.get("super_area_id"),
+            "mask":          state.local_mask.copy(),
+            "thresholds":    local_vals,
+            "bbox":          state.local_bbox,
+            "seed_norm":     orig.get("seed_norm"),
+            "seal":          orig.get("seal", _SEAL_DEFAULT),
+        }
         state.patches[state.local_patch_idx] = new_patch
     else:
+        # New patch
+        new_patch = {
+            "patch_id":      _alloc_patch_id(state),
+            "super_area_id": None,
+            "mask":          state.local_mask.copy(),
+            "thresholds":    local_vals,
+            "bbox":          state.local_bbox,
+        }
+        if state.local_seed_disp is not None:
+            sx, sy = state.local_seed_disp
+            new_patch["seed_norm"] = (sx / max(1, w), sy / max(1, h))
+            new_patch["seal"]      = state.local_seal
         state.patches.append(new_patch)
 
 
@@ -877,9 +969,11 @@ def _patches_to_session_data(patches: list) -> list:
         if sn is None:
             continue
         out.append({
-            "seed_norm":  [round(sn[0], 6), round(sn[1], 6)],
-            "seal":       int(p.get("seal", _SEAL_DEFAULT)),
-            "thresholds": list(p["thresholds"]),
+            "patch_id":      p.get("patch_id", 0),
+            "super_area_id": p.get("super_area_id"),
+            "seed_norm":     [round(sn[0], 6), round(sn[1], 6)],
+            "seal":          int(p.get("seal", _SEAL_DEFAULT)),
+            "thresholds":    list(p["thresholds"]),
         })
     return out
 
@@ -888,38 +982,310 @@ def _restore_patches_from_session(
     warped_display: np.ndarray,
     patches_data: list,
     global_sliders: list,
-) -> list:
-    """Reconstruct patch masks from saved session data."""
+) -> tuple[list, int]:
+    """Reconstruct patch masks from saved session data.
+
+    Returns (patches, next_patch_id) where next_patch_id is one beyond the
+    highest patch_id seen, so new patches in this session never collide.
+    """
     if not patches_data:
-        return []
+        return [], 0
 
     g_vals   = [sl.value for sl in global_sliders]
     inv_gray = compute_lab_edges(warped_display, *g_vals)
     h, w     = warped_display.shape[:2]
     restored = []
+    max_pid  = -1
 
     for pd in patches_data:
         try:
-            nx, ny = pd["seed_norm"]
-            seal   = int(pd.get("seal", _SEAL_DEFAULT))
-            thresh = tuple(pd["thresholds"])
-            sx     = max(0, min(int(round(nx * w)), w - 1))
-            sy     = max(0, min(int(round(ny * h)), h - 1))
-            mask   = _flood_fill_region(inv_gray, sx, sy, seal_px=seal)
-            bbox   = _bbox_from_mask(mask)
+            nx, ny    = pd["seed_norm"]
+            seal      = int(pd.get("seal", _SEAL_DEFAULT))
+            thresh    = tuple(pd["thresholds"])
+            pid       = int(pd.get("patch_id", 0))
+            sa_id     = pd.get("super_area_id")
+            sx        = max(0, min(int(round(nx * w)), w - 1))
+            sy        = max(0, min(int(round(ny * h)), h - 1))
+            mask      = _flood_fill_region(inv_gray, sx, sy, seal_px=seal)
+            bbox      = _bbox_from_mask(mask)
             if bbox is None:
                 continue
+            max_pid = max(max_pid, pid)
             restored.append({
-                "mask":       mask,
-                "thresholds": thresh,
-                "bbox":       bbox,
-                "seed_norm":  (nx, ny),
-                "seal":       seal,
+                "patch_id":      pid,
+                "super_area_id": sa_id,
+                "mask":          mask,
+                "thresholds":    thresh,
+                "bbox":          bbox,
+                "seed_norm":     (nx, ny),
+                "seal":          seal,
             })
         except Exception:
             continue
 
-    return restored
+    return restored, max_pid + 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — super-area helpers
+# ---------------------------------------------------------------------------
+
+def _alloc_patch_id(state: _EdgemapState) -> int:
+    pid = state.next_patch_id
+    state.next_patch_id += 1
+    return pid
+
+
+def _alloc_super_area_id(state: _EdgemapState) -> int:
+    sid = state.next_super_area_id
+    state.next_super_area_id += 1
+    return sid
+
+
+def _get_sa(state: _EdgemapState, sa_id: int) -> dict | None:
+    return next((s for s in state.super_areas if s["super_area_id"] == sa_id), None)
+
+
+def _masks_adjacent(mask_a: np.ndarray, mask_b: np.ndarray, px: int = _MERGE_ADJ_PX) -> bool:
+    """Return True if mask_a and mask_b are within px pixels of each other."""
+    k = 2 * px + 1
+    kern    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    dilated = cv2.dilate((mask_a > 0).astype(np.uint8), kern)
+    return bool(np.any(dilated & (mask_b > 0).astype(np.uint8)))
+
+
+def _make_merge_sliders_from_thresholds(thresholds: tuple) -> list:
+    return [
+        _Slider(
+            label   = _MERGE_SLIDER_META[i][0],
+            min_val = defn[1],
+            max_val = defn[2],
+            value   = max(defn[1], min(defn[2], thresholds[i])),
+            color   = _MERGE_SLIDER_META[i][1],
+        )
+        for i, defn in enumerate(_SLIDER_DEFS)
+    ]
+
+
+def _enter_sa_edit(state: _EdgemapState, sa_id: int) -> None:
+    """Open super-area Lab slider editing for sa_id."""
+    sa = _get_sa(state, sa_id)
+    if sa is None:
+        return
+    state.merge_active_sa_id = sa_id
+    state.merge_sliders      = _make_merge_sliders_from_thresholds(sa["thresholds"])
+    state.merge_init_vals    = list(sa["thresholds"])
+    state.merge_drag_idx     = None
+    state.merge_dirty        = True
+
+
+def _exit_sa_edit(state: _EdgemapState) -> None:
+    """Commit current SA sliders and leave SA edit (stay in merge mode)."""
+    _commit_sa_edit(state)
+    state.merge_active_sa_id = None
+    state.merge_sliders      = []
+    state.merge_init_vals    = []
+    state.merge_drag_idx     = None
+
+
+def _commit_sa_edit(state: _EdgemapState) -> None:
+    """Write current merge slider values back to the active super-area."""
+    if state.merge_active_sa_id is None or not state.merge_sliders:
+        return
+    sa = _get_sa(state, state.merge_active_sa_id)
+    if sa is None:
+        return
+    sa["thresholds"] = tuple(sl.value for sl in state.merge_sliders)
+    state.edges_dirty = True
+
+
+def _unmerge_patch(state: _EdgemapState, patch_id: int) -> None:
+    """Remove a patch from its super-area.  Dissolve SA if only 1 member remains."""
+    patch = next((p for p in state.patches if p["patch_id"] == patch_id), None)
+    if patch is None:
+        return
+    sa_id = patch.get("super_area_id")
+    if sa_id is None:
+        return
+    sa = _get_sa(state, sa_id)
+    if sa and patch_id in sa["patch_ids"]:
+        sa["patch_ids"].remove(patch_id)
+        if len(sa["patch_ids"]) <= 1:
+            # Dissolve — clear super_area_id on the last remaining member too
+            for p in state.patches:
+                if p.get("super_area_id") == sa_id:
+                    p["super_area_id"] = None
+            state.super_areas = [s for s in state.super_areas if s["super_area_id"] != sa_id]
+            # If we were editing this SA, exit SA edit
+            if state.merge_active_sa_id == sa_id:
+                state.merge_active_sa_id = None
+                state.merge_sliders      = []
+                state.merge_init_vals    = []
+    patch["super_area_id"] = None
+    state.edges_dirty  = True
+    state.merge_dirty  = True
+
+
+def _unpatch_by_id(state: _EdgemapState, patch_id: int) -> None:
+    """Delete a patch entirely.  Unmerges from SA first if necessary."""
+    _unmerge_patch(state, patch_id)
+    state.patches    = [p for p in state.patches if p["patch_id"] != patch_id]
+    state.edges_dirty = True
+    state.merge_dirty = True
+
+
+def _do_merge_lclick(state: _EdgemapState, disp_x: int, disp_y: int) -> None:
+    """Handle a left-click on the edge panel while in merge mode."""
+    try:
+        _do_merge_lclick_inner(state, disp_x, disp_y)
+    except Exception as exc:
+        print(f"[MERGE lclick error] {exc!r}")
+
+
+def _do_merge_lclick_inner(state: _EdgemapState, disp_x: int, disp_y: int) -> None:
+    # Click on an existing patch → enter SA edit (if it has one) or ignore
+    for patch in reversed(state.patches):
+        if patch["mask"][disp_y, disp_x] > 0:
+            sa_id = patch.get("super_area_id")
+            if sa_id is not None:
+                _enter_sa_edit(state, sa_id)
+                state.merge_dirty = True
+            # standalone patch: left-click does nothing; right-click unpatches
+            return
+
+    # Empty area: flood-fill, check adjacency, join
+    if state.inv_gray_cache is None:
+        return
+    mask = _flood_fill_region(state.inv_gray_cache, disp_x, disp_y,
+                               seal_px=state.local_seal)
+    bbox = _bbox_from_mask(mask)
+    if bbox is None:
+        return
+
+    # Find first adjacent existing patch
+    adjacent = None
+    for patch in reversed(state.patches):
+        if _masks_adjacent(mask, patch["mask"]):
+            adjacent = patch
+            break
+
+    if adjacent is None:
+        print("[MERGE] No adjacent patch found — click closer to an existing patch")
+        return   # not touching any patch — rejected
+
+    new_pid = _alloc_patch_id(state)
+    h, w    = state.warped_display.shape[:2]
+    new_patch: dict = {
+        "patch_id":      new_pid,
+        "super_area_id": None,           # set below
+        "mask":          mask,
+        "thresholds":    tuple(sl.value for sl in state.sliders),  # own values at join time
+        "bbox":          bbox,
+        "seed_norm":     (disp_x / max(1, w), disp_y / max(1, h)),
+        "seal":          state.local_seal,
+    }
+
+    adj_sa_id = adjacent.get("super_area_id")
+    if adj_sa_id is None:
+        # Adjacent patch is standalone → create a new super-area wrapping both
+        new_sa_id = _alloc_super_area_id(state)
+        adjacent["super_area_id"] = new_sa_id
+        new_patch["super_area_id"] = new_sa_id
+        sa = {
+            "super_area_id": new_sa_id,
+            "thresholds":    adjacent["thresholds"],   # seed from adjacent patch's own thresholds
+            "patch_ids":     [adjacent["patch_id"], new_pid],
+        }
+        state.super_areas.append(sa)
+        state.patches.append(new_patch)
+        _enter_sa_edit(state, new_sa_id)
+    else:
+        # Adjacent patch is in an existing SA → join it
+        sa = _get_sa(state, adj_sa_id)
+        new_patch["super_area_id"] = adj_sa_id
+        sa["patch_ids"].append(new_pid)
+        state.patches.append(new_patch)
+        _enter_sa_edit(state, adj_sa_id)
+
+    state.edges_dirty = True
+    state.merge_dirty = True
+
+
+def _do_merge_rclick(state: _EdgemapState, disp_x: int, disp_y: int) -> None:
+    """Handle a right-click on the edge panel while in merge mode."""
+    try:
+        for patch in reversed(state.patches):
+            if patch["mask"][disp_y, disp_x] > 0:
+                sa_id = patch.get("super_area_id")
+                if sa_id is not None:
+                    _unmerge_patch(state, patch["patch_id"])
+                else:
+                    _unpatch_by_id(state, patch["patch_id"])
+                return
+    except Exception as exc:
+        print(f"[MERGE rclick error] {exc!r}")
+
+
+def _make_merge_edge_panel(
+    warped_display: np.ndarray,
+    sliders: list,
+    patches: list,
+    super_areas: list,
+    color_idx: int,
+    active_sa_id: int | None = None,
+) -> np.ndarray:
+    """Edge panel for merge mode: base composite + coloured rings per patch/SA."""
+    composite = _compute_composite_inv_gray(warped_display, sliders, patches, super_areas)
+    _name, edge_bgr, bg_bgr = _EDGE_COLORS[color_idx]
+    out = np.full((*composite.shape, 3), bg_bgr, dtype=np.uint8)
+    out[composite == 0] = edge_bgr
+
+    kern = np.ones((5, 5), np.uint8)
+    for patch in patches:
+        sa_id   = patch.get("super_area_id")
+        dilated = cv2.dilate(patch["mask"], kern, iterations=2)
+        ring    = (dilated > 0) & (patch["mask"] == 0)
+        if sa_id is None:
+            ring_color = _AMBER                   # standalone patch — amber
+        elif sa_id == active_sa_id:
+            ring_color = (80, 255, 80)            # active SA — bright green
+        else:
+            ring_color = _MERGE_GREEN             # other SA — muted green
+        out[ring] = ring_color
+
+    # Banner
+    cv2.rectangle(out, (0, 0), (out.shape[1], 28), (0, 140, 40), -1)
+    msg = "MERGE  \u2014  L-click=join/edit SA  R-click=unmerge/unpatch  Esc=exit"
+    cv2.putText(out, msg, (8, 19), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                (255, 255, 255), 1, cv2.LINE_AA)
+    return _add_border(out, _BORDER, color=_MERGE_GREEN)
+
+
+def _super_areas_to_session_data(super_areas: list) -> list:
+    """Serialise super_areas to a JSON-safe list (no numpy arrays)."""
+    return [
+        {
+            "super_area_id": sa["super_area_id"],
+            "thresholds":    list(sa["thresholds"]),
+            "patch_ids":     list(sa["patch_ids"]),
+        }
+        for sa in super_areas
+    ]
+
+
+def _restore_super_areas_from_session(super_areas_data: list) -> list:
+    """Reconstruct super_areas list from session JSON data."""
+    result = []
+    for sd in super_areas_data:
+        try:
+            result.append({
+                "super_area_id": int(sd["super_area_id"]),
+                "thresholds":    tuple(sd["thresholds"]),
+                "patch_ids":     list(sd["patch_ids"]),
+            })
+        except Exception:
+            continue
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -936,7 +1302,7 @@ def _make_filmstrip_panel(state: _EdgemapState, total_w: int) -> np.ndarray:
     click the EXIT LOCAL button or press Esc first.
     """
     panel  = np.full((_FILM_H, total_w, 3), 18, dtype=np.uint8)
-    dimmed = state.local_mode
+    dimmed = state.local_mode or state.merge_mode
 
     # Separator at top of strip
     cv2.line(panel, (0, 0), (total_w, 0), (55, 55, 55), 1)
@@ -992,7 +1358,7 @@ def _make_filmstrip_panel(state: _EdgemapState, total_w: int) -> np.ndarray:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.30, (80, 100, 120), 1, cv2.LINE_AA)
 
     if dimmed:
-        hint = "Exit local mode to navigate Takes"
+        hint = "Exit merge/local mode to navigate Takes" if state.merge_mode else "Exit local mode to navigate Takes"
         (hw, _), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
         cv2.putText(panel, hint,
                     (total_w // 2 - hw // 2, _FILM_H // 2 + 5),
@@ -1080,16 +1446,70 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
     ep_w = state.warped_display.shape[1] + 2 * _BORDER
     on_edge_panel = (_CTRL_W <= x < _CTRL_W + ep_w)
 
+    # ---- RIGHT-CLICK -------------------------------------------------------
+    if event == cv2.EVENT_RBUTTONDOWN:
+        if state.main_panel_h > 0 and y >= state.main_panel_h:
+            return   # ignore in filmstrip
+        if on_edge_panel:
+            dh, dw = state.warped_display.shape[:2]
+            disp_x = max(0, min(x - _CTRL_W - _BORDER, dw - 1))
+            disp_y = max(0, min(y - _BORDER, dh - 1))
+            if state.local_mode:
+                # Cancel local selection without committing
+                _exit_local_mode(state)
+                state.edges_dirty = True
+            elif state.merge_mode:
+                _do_merge_rclick(state, disp_x, disp_y)
+            else:
+                # Normal mode: right-click on patch → unpatch
+                for patch in reversed(state.patches):
+                    if patch["mask"][disp_y, disp_x] > 0:
+                        _unpatch_by_id(state, patch["patch_id"])
+                        return
+        return
+
+    # ---- LEFT-CLICK --------------------------------------------------------
     if event == cv2.EVENT_LBUTTONDOWN:
 
-        # ---- Filmstrip (below main panels) ---------------------------------
-        if state.main_panel_h > 0 and y >= state.main_panel_h and not state.local_mode:
-            _handle_filmstrip_click(state, x, y - state.main_panel_h)
+        # Filmstrip (below main panels)
+        if state.main_panel_h > 0 and y >= state.main_panel_h:
+            if not state.local_mode and not state.merge_mode:
+                _handle_filmstrip_click(state, x, y - state.main_panel_h)
             return
 
         if x < _CTRL_W:
-            # ---- Control panel ------------------------------------------ #
-            if state.local_mode:
+            # ---- Control panel ---------------------------------------------
+            if state.merge_mode:
+                # SA slider drag
+                if state.merge_active_sa_id is not None:
+                    for i, sl in enumerate(state.merge_sliders):
+                        ty = _track_y(i)
+                        if (x - sl.handle_x()) ** 2 + (y - ty) ** 2 <= (_HANDLE_R + 5) ** 2:
+                            state.merge_drag_idx = i
+                            return
+                if _hit_button(x, y, _BTN_RESET_CX, _BTN_CY):
+                    if state.merge_active_sa_id is not None:
+                        for sl, iv in zip(state.merge_sliders, state.merge_init_vals):
+                            sl.value = iv
+                        _commit_sa_edit(state)
+                        state.merge_dirty = True
+                elif _hit_button(x, y, _BTN_TAKE_CX, _BTN_CY):
+                    _do_take(state)
+                elif _hit_button(x, y, _BTN_DONE_CX, _BTN_CY):
+                    state.done = True
+                elif _hit_button(x, y, _BTN_CLR_CX, _OC_BTN_CY, _OC_BTN_W, _OC_BTN_H):
+                    state.color_idx  = (state.color_idx + 1) % len(_EDGE_COLORS)
+                    state.merge_dirty = True
+                elif _hit_button(x, y, _CTRL_W // 2, _MERGE_BTN_CY, 160, _BTN_H):
+                    # EXIT MERGE
+                    if state.merge_active_sa_id is not None:
+                        _exit_sa_edit(state)
+                    state.merge_mode  = False
+                    state.merge_dirty = False
+                    state.merge_edge_panel = None
+                    state.edges_dirty = True
+
+            elif state.local_mode:
                 for i, sl in enumerate(state.local_sliders):
                     ty = _track_y(i)
                     if (x - sl.handle_x()) ** 2 + (y - ty) ** 2 <= (_HANDLE_R + 5) ** 2:
@@ -1125,7 +1545,9 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
                         del state.patches[state.local_patch_idx]
                         _exit_local_mode(state)
                         state.edges_dirty = True
+
             else:
+                # Global mode
                 for i, sl in enumerate(state.sliders):
                     ty = _track_y(i)
                     if (x - sl.handle_x()) ** 2 + (y - ty) ** 2 <= (_HANDLE_R + 5) ** 2:
@@ -1135,6 +1557,7 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
                     for sl, iv in zip(state.sliders, state.initial_values):
                         sl.value = iv
                     state.patches.clear()
+                    state.super_areas.clear()
                     state.edges_dirty = True
                 elif _hit_button(x, y, _BTN_TAKE_CX, _BTN_CY):
                     _do_take(state)
@@ -1149,45 +1572,61 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
                 elif (state.patches and
                       _hit_button(x, y, _CTRL_W // 2, _SEAL_ROW_Y, 100, _SEAL_PBTN_H)):
                     state.patches.clear()
+                    state.super_areas.clear()
                     state.edges_dirty = True
+                elif (_hit_button(x, y, _CTRL_W // 2, _MERGE_BTN_CY, 100, _BTN_H)
+                      and len(state.patches) >= 1):
+                    state.merge_mode  = True
+                    state.merge_dirty = True
+                    state.edges_dirty = True   # ensure inv_gray_cache is fresh for flood fill
 
         elif on_edge_panel:
-            # ---- Edge panel click ---------------------------------------- #
+            # ---- Edge panel click ------------------------------------------
             dh, dw = state.warped_display.shape[:2]
             disp_x = max(0, min(x - _CTRL_W - _BORDER, dw - 1))
             disp_y = max(0, min(y - _BORDER, dh - 1))
 
-            if state.local_mode:
+            if state.merge_mode:
+                _do_merge_lclick(state, disp_x, disp_y)
+            elif state.local_mode:
                 if state.local_mask is not None and state.local_mask[disp_y, disp_x] == 0:
                     _commit_local_patch(state)
                     _exit_local_mode(state)
                     state.edges_dirty = True
             else:
-                # Only enter local mode when viewing live state (not a preview)
                 if state.preview_take_idx is None:
                     _enter_local_mode(state, disp_x, disp_y)
                 else:
-                    # Clicking edge panel clears preview and returns to live
                     state.preview_take_idx = None
                     state.edges_dirty      = True
 
+    # ---- MOUSE MOVE --------------------------------------------------------
     elif event == cv2.EVENT_MOUSEMOVE:
-        if state.local_mode and state.local_drag_idx is not None:
+        if state.merge_mode and state.merge_drag_idx is not None:
+            sl = state.merge_sliders[state.merge_drag_idx]
+            nv = sl.value_from_x(x)
+            if nv != sl.value:
+                sl.value = nv
+                _commit_sa_edit(state)
+                state.merge_dirty = True
+        elif state.local_mode and state.local_drag_idx is not None:
             sl = state.local_sliders[state.local_drag_idx]
             nv = sl.value_from_x(x)
             if nv != sl.value:
                 sl.value          = nv
                 state.local_dirty = True
-        elif not state.local_mode and state.drag_idx is not None:
+        elif not state.local_mode and not state.merge_mode and state.drag_idx is not None:
             sl = state.sliders[state.drag_idx]
             nv = sl.value_from_x(x)
             if nv != sl.value:
                 sl.value          = nv
                 state.edges_dirty = True
 
+    # ---- BUTTON UP ---------------------------------------------------------
     elif event == cv2.EVENT_LBUTTONUP:
         state.drag_idx       = None
         state.local_drag_idx = None
+        state.merge_drag_idx = None
 
 
 # ---------------------------------------------------------------------------
@@ -1207,9 +1646,9 @@ def _do_take(state: _EdgemapState) -> None:
     h_full, w_full = state.warped_full.shape[:2]
     h_disp, w_disp = state.warped_display.shape[:2]
 
-    # Base composite: global thresholds + all committed patches
+    # Base composite: global thresholds + all committed patches + super-areas
     composite_base = _compute_composite_inv_gray(
-        state.warped_display, state.sliders, state.patches)
+        state.warped_display, state.sliders, state.patches, state.super_areas)
 
     if state.local_mode and state.local_mask is not None:
         local_vals = tuple(sl.value for sl in state.local_sliders)
@@ -1277,7 +1716,8 @@ def edit_edgemap(
     b_hi: int = 90,
     initial_patches_data: list | None = None,
     initial_takes_data: list | None = None,
-) -> tuple[list, list]:
+    initial_super_areas_data: list | None = None,
+) -> tuple[list, list, list]:
     """Open the three-panel Lab edge-map editor.
 
     Global mode
@@ -1314,11 +1754,10 @@ def edit_edgemap(
 
     Returns
     -------
-    (new_takes, patches_data)
-        new_takes    – list of dicts for takes created in this session (index >= 1
-                       and is_new=True).  Take 0 is included if it was created here
-                       (fresh session) so the session JSON can record it.
-        patches_data – serialisable patch list for the session JSON.
+    (new_takes, patches_data, super_areas_data)
+        new_takes        – list of dicts for takes created in this session.
+        patches_data     – serialisable patch list for the session JSON.
+        super_areas_data – serialisable super-area list for the session JSON.
     """
     initial_vals = [l_lo, l_hi, a_lo, a_hi, b_lo, b_hi]
     sliders = [
@@ -1375,10 +1814,20 @@ def edit_edgemap(
 
     # --- Restore committed patches from a previous session ------------------
     if initial_patches_data:
-        state.patches = _restore_patches_from_session(
+        restored_patches, next_pid = _restore_patches_from_session(
             master_scaled, initial_patches_data, sliders)
+        state.patches       = restored_patches
+        state.next_patch_id = next_pid
         if state.patches:
             print(f"[INFO] Restored {len(state.patches)} local patch(es) from session")
+
+    # --- Restore super-areas from a previous session ------------------------
+    if initial_super_areas_data:
+        state.super_areas = _restore_super_areas_from_session(initial_super_areas_data)
+        if state.super_areas:
+            max_said = max(s["super_area_id"] for s in state.super_areas)
+            state.next_super_area_id = max_said + 1
+            print(f"[INFO] Restored {len(state.super_areas)} super-area(s) from session")
 
     cv2.namedWindow(_EDGEMAP_WINDOW, cv2.WINDOW_NORMAL)
     cv2.setMouseCallback(_EDGEMAP_WINDOW, _edgemap_mouse, state)
@@ -1392,7 +1841,8 @@ def edit_edgemap(
         state.color_idx, state.overlay_on,
     )
     state.edge_panel, state.inv_gray_cache = _make_edge_panel(
-        state.warped_display, state.sliders, state.color_idx, patches=state.patches)
+        state.warped_display, state.sliders, state.color_idx,
+        patches=state.patches, super_areas=state.super_areas)
     state.edges_dirty = False
     _bt_h = max(_boot_ctrl.shape[0], state.edge_panel.shape[0], master_panel.shape[0])
     state.main_panel_h = _bt_h
@@ -1412,20 +1862,34 @@ def edit_edgemap(
         while not state.done:
 
             # Rebuild panels when dirty
-            if state.edges_dirty and not state.local_mode:
+            if state.edges_dirty and not state.local_mode and not state.merge_mode:
                 state.edge_panel, state.inv_gray_cache = _make_edge_panel(
                     state.warped_display, state.sliders, state.color_idx,
-                    patches=state.patches)
+                    patches=state.patches, super_areas=state.super_areas)
                 if state.overlay_on:
                     state.overlay_panel = _make_overlay_panel(
                         state.warped_display, state.sliders, state.color_idx,
-                        patches=state.patches)
+                        patches=state.patches, super_areas=state.super_areas)
                 state.edges_dirty = False
+
+            if state.edges_dirty and state.merge_mode:
+                state.edge_panel, state.inv_gray_cache = _make_edge_panel(
+                    state.warped_display, state.sliders, state.color_idx,
+                    patches=state.patches, super_areas=state.super_areas)
+                state.edges_dirty = False
+
+            if state.merge_dirty and state.merge_mode:
+                state.merge_edge_panel = _make_merge_edge_panel(
+                    state.warped_display, state.sliders, state.patches,
+                    state.super_areas, state.color_idx,
+                    active_sa_id=state.merge_active_sa_id)
+                state.merge_dirty = False
 
             if state.local_dirty and state.local_mode:
                 state.local_edge_panel = _make_local_edge_panel(
                     state.warped_display, state.sliders, state.local_sliders,
-                    state.local_mask, state.color_idx, patches=state.patches)
+                    state.local_mask, state.color_idx, patches=state.patches,
+                    super_areas=state.super_areas)
                 state.local_zoom_panel = _make_zoom_panel(
                     state.warped_display, state.local_bbox)
                 state.local_dirty = False
@@ -1439,9 +1903,16 @@ def edit_edgemap(
                 local_seal=state.local_seal,
                 patch_count=len(state.patches),
                 local_patch_idx=state.local_patch_idx,
+                merge_mode=state.merge_mode,
+                merge_sliders=state.merge_sliders if state.merge_mode else None,
+                merge_active_sa_id=state.merge_active_sa_id,
+                super_area_count=len(state.super_areas),
             )
 
-            if state.local_mode:
+            if state.merge_mode:
+                mid_panel   = state.merge_edge_panel if state.merge_edge_panel is not None else state.edge_panel
+                right_panel = state.master_panel
+            elif state.local_mode:
                 mid_panel   = state.local_edge_panel if state.local_edge_panel is not None else state.edge_panel
                 right_panel = state.local_zoom_panel if state.local_zoom_panel is not None else state.master_panel
             elif state.preview_take_idx is not None:
@@ -1497,11 +1968,31 @@ def edit_edgemap(
                 if state.local_mode:
                     _exit_local_mode(state)
                     state.edges_dirty = True
+                elif state.merge_mode:
+                    if state.merge_active_sa_id is not None:
+                        _exit_sa_edit(state)   # commit SA sliders, stay in merge mode
+                        state.merge_dirty = True
+                    else:
+                        state.merge_mode       = False
+                        state.merge_edge_panel = None
+                        state.edges_dirty      = True
                 elif state.preview_take_idx is not None:
                     state.preview_take_idx = None
                     state.edges_dirty      = True
                 else:
                     state.done = True
+
+            elif key in (ord("m"), ord("M")):
+                if not state.local_mode:
+                    if state.merge_mode:
+                        if state.merge_active_sa_id is not None:
+                            _exit_sa_edit(state)
+                        state.merge_mode       = False
+                        state.merge_edge_panel = None
+                        state.edges_dirty      = True
+                    elif len(state.patches) >= 1:
+                        state.merge_mode  = True
+                        state.merge_dirty = True
 
             elif key in (ord("l"), ord("L")):
                 if state.local_mode:
@@ -1546,4 +2037,4 @@ def edit_edgemap(
         if t.is_new
     ]
 
-    return new_takes, _patches_to_session_data(state.patches)
+    return new_takes, _patches_to_session_data(state.patches), _super_areas_to_session_data(state.super_areas)
