@@ -115,30 +115,31 @@ def edit_quad(image: np.ndarray, initial_corners: np.ndarray) -> np.ndarray | No
 _EDGEMAP_WINDOW = "paintscan - edge map  (T=take  R=reset  Esc=done/exit-local)"
 
 # --- Layout constants -------------------------------------------------------
-_CTRL_W = 300
-_BORDER = 10
+_CTRL_W  = 300   # Lab control column
+_CTRL2_W = 240   # info / Take-detail column
+_BORDER  = 10
 
 _CTRL_TOP  = 38
-_BAND_H    = 110
+_BAND_H    = 85
 _TRACK_X0  = 28
 _TRACK_X1  = 272
 _HANDLE_R  = 9
 
 _BTN_W, _BTN_H = 72, 34
-_BTN_CY        = _CTRL_TOP + 6 * _BAND_H + 48   # ≈ 746
+_BTN_CY        = _CTRL_TOP + 6 * _BAND_H + 35   # 583
 _BTN_RESET_CX  = 50
 _BTN_TAKE_CX   = 150
 _BTN_DONE_CX   = 250
 
-_TAKE_COUNT_Y  = _BTN_CY + _BTN_H // 2 + 22     # ≈ 785
+_TAKE_COUNT_Y  = _BTN_CY + _BTN_H // 2 + 18     # 618
 
 _OC_BTN_W   = 116
 _OC_BTN_H   = 28
-_OC_BTN_CY  = 820
+_OC_BTN_CY  = 678
 _BTN_OVL_CX = 75
 _BTN_CLR_CX = 220
 
-_TOTAL_H = 916   # extended for MERGE button row
+_TOTAL_H = 788   # ctrl panel — 788+216=1004px, fits 1080p
 
 # Amber accent for local mode (BGR)
 _AMBER: tuple = (0, 165, 255)
@@ -147,7 +148,7 @@ _AMBER: tuple = (0, 165, 255)
 _MERGE_GREEN: tuple = (0, 180, 60)
 
 # SEAL row (local mode only) — gap-close control sits below OVL/CLR
-_SEAL_ROW_Y    = 856
+_SEAL_ROW_Y    = 714
 _SEAL_MINUS_CX = 60
 _SEAL_PLUS_CX  = 240
 _SEAL_PBTN_W   = 38
@@ -157,20 +158,43 @@ _SEAL_MAX      = 20
 _SEAL_DEFAULT  = 4    # bridges gaps up to ~8 px wide; raise for loose edge maps
 
 # Merge button row — sits below the SEAL row
-_MERGE_BTN_CY  = 892
+_MERGE_BTN_CY  = 750
 _MERGE_ADJ_PX  = 15   # dilation px for adjacency check — generous to handle thick Canny edges
 
-# --- Filmstrip constants ----------------------------------------------------
-_FILM_H       = 108   # total strip height below the main panels
-_FILM_SLOT_W  =  82   # per-Take slot width (thumbnail + padding)
-_FILM_THUMB_H =  76   # thumbnail image height within slot
-_FILM_THUMB_W =  74   # thumbnail image width within slot
-_FILM_START_X =   4   # x-start of the first thumbnail slot
+# --- Filmstrip: two rows (Takes top, Color versions bottom) -----------------
+_FILM_ROW_H   = 108   # height of each row
+_FILM_H       = 216   # total strip height (two rows)
+_FILM_SLOT_W  =  82
+_FILM_THUMB_H =  76
+_FILM_THUMB_W =  74
+_FILM_START_X =   4
 _FILM_BTN_W   =  64
 _FILM_BTN_H   =  32
-_FILM_BTN_CY  = _FILM_H // 2   # vertical centre for LIVE / SEED buttons
-_FILM_LIVE_R  =  42   # LIVE button cx, measured inward from right edge
-_FILM_SEED_R  = 116   # SEED button cx, measured inward from right edge
+_FILM_BTN_CY  = _FILM_ROW_H // 2          # Take row button centre
+_FILM_CLR_CY  = _FILM_ROW_H + _FILM_ROW_H // 2  # color row button centre
+_FILM_LIVE_R  =  42
+_FILM_SEED_R  = 116
+_FILM_CLR_R   =  90   # COLORIZE button cx from right in color row
+
+# Rose accent for colorize
+_ROSE: tuple = (130, 90, 220)
+
+# Colorize editor constants
+_CLR_WINDOW   = "paintscan - colorize  (A=apply  S=save  R=reset  Esc=cancel)"
+_CLR_SLIDER_DEFS: list[tuple] = [
+    ("H target",   0, 179,  90, (180,  90, 255)),
+    ("S target",   0, 255, 128, ( 60, 200,  60)),
+    ("V scale %",  0, 200, 100, (200, 200,  60)),
+]
+_CLR_CTRL_TOP   = 38
+_CLR_BAND_H     = 110
+_CLR_BTN_CY     = _CLR_CTRL_TOP + 3 * _CLR_BAND_H + 48
+_CLR_RESET_CX   = 75
+_CLR_APPLY_CX   = 225
+_CLR_SEAL_ROW_Y = _CLR_BTN_CY + 50
+_CLR_SAVE_CY    = _CLR_SEAL_ROW_Y + 50
+_CLR_CLR_CY     = _CLR_SAVE_CY + 44
+_CLR_TOTAL_H    = _CLR_CLR_CY + 60
 
 # --- Edge colour palette ----------------------------------------------------
 _EDGE_COLORS: list[tuple[str, tuple, tuple]] = [
@@ -248,6 +272,7 @@ class _TakeEntry:
     thumbnail:         np.ndarray
     patches_snapshot:  list
     is_new:            bool = True
+    color_versions:    list = field(default_factory=list)  # child color versions
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +378,13 @@ class _EdgemapState:
     merge_dirty:        bool = False
     merge_edge_panel:   Optional[np.ndarray] = None
 
+    # Phase 3 — colorize / filmstrip
+    colorize_take_idx:    Optional[int] = None   # set when user hits COLORIZE
+    preview_color_ver_id: Optional[int] = None   # which color swatch is selected
+    pre_seed_values:      Optional[list] = None  # slider values before Take was selected
+    has_take_zero:        bool = False            # Take-0 exists (user has pressed TAKE once)
+    base_image:           str  = "master"        # base image label for this session
+
 
 # ---------------------------------------------------------------------------
 # Control panel drawing
@@ -372,6 +404,7 @@ def _draw_ctrl_panel(
     merge_sliders: list | None = None,
     merge_active_sa_id: int | None = None,
     super_area_count: int = 0,
+    has_take_zero: bool = False,
 ) -> np.ndarray:
     panel = np.full((_TOTAL_H, _CTRL_W, 3), 28, dtype=np.uint8)
 
@@ -390,12 +423,15 @@ def _draw_ctrl_panel(
         else:
             title_bg   = (0, 100, 180)
             title_text = "LOCAL MODE"
+    elif not has_take_zero:
+        title_bg   = (30, 30, 90)
+        title_text = "Tune borders — press TAKE for T0"
     else:
         title_bg   = (45, 45, 45)
         title_text = "Lab Edge Thresholds"
     cv2.rectangle(panel, (0, 0), (_CTRL_W, _CTRL_TOP - 4), title_bg, -1)
     cv2.putText(panel, title_text, (10, 24),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1, cv2.LINE_AA)
+                cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1, cv2.LINE_AA)
 
     if merge_mode and merge_sliders and merge_active_sa_id is not None:
         active = merge_sliders
@@ -494,24 +530,30 @@ def _draw_ctrl_panel(
     elif patch_count > 0:
         _draw_button(panel, "CLR PTCH", _CTRL_W // 2, _SEAL_ROW_Y,
                      (60, 40, 40), 100, _SEAL_PBTN_H)
+    elif not has_take_zero:
+        hint = "Press TAKE to unlock local mode"
+        (tw, _), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.36, 1)
+        cv2.putText(panel, hint, (_CTRL_W // 2 - tw // 2, _SEAL_ROW_Y + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.36, (80, 60, 60), 1, cv2.LINE_AA)
     else:
         hint = "Click edge panel to select area"
         (tw, _), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
         cv2.putText(panel, hint, (_CTRL_W // 2 - tw // 2, _SEAL_ROW_Y + 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.38, (80, 80, 80), 1, cv2.LINE_AA)
 
-    # MERGE / EXIT MERGE row — always visible, below SEAL row
+    # MERGE / EXIT MERGE row
     if merge_mode:
         _draw_button(panel, "EXIT MERGE", _CTRL_W // 2, _MERGE_BTN_CY,
                      (0, 100, 20), 160, _BTN_H)
-    elif patch_count >= 1:
+    elif patch_count >= 1 and has_take_zero:
         _draw_button(panel, "MERGE", _CTRL_W // 2, _MERGE_BTN_CY,
                      _MERGE_GREEN, 100, _BTN_H)
     else:
-        hint2 = "Make patches to enable merge"
+        hint2 = "Make patches to enable merge" if has_take_zero else "Press TAKE to unlock merge"
+        col2  = (55, 55, 55) if has_take_zero else (70, 50, 50)
         (tw, _), _ = cv2.getTextSize(hint2, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)
         cv2.putText(panel, hint2, (_CTRL_W // 2 - tw // 2, _MERGE_BTN_CY + 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (55, 55, 55), 1, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, col2, 1, cv2.LINE_AA)
 
     return panel
 
@@ -654,13 +696,24 @@ def _compute_panel_size(image: np.ndarray) -> tuple[int, int]:
 
     # Each panel may use at most half the horizontal space left after the
     # control strip and inter-panel borders.
-    avail_w = (sw - _CTRL_W - _BORDER * 6) // 2
+    avail_w = (sw - _CTRL_W - _CTRL2_W - _BORDER * 8) // 2
     avail_h = sh - _FILM_H - _BORDER * 4 - os_chrome
 
     scale  = min(avail_w / max(iw, 1), avail_h / max(ih, 1))
     new_w  = max(1, int(iw * scale))
     new_h  = max(1, int(ih * scale))
     return new_w, new_h
+
+
+def _compute_panel_size_colorize(image: np.ndarray) -> tuple[int, int]:
+    """Panel size for the 3-column colorize window (ctrl + edge + painted). No filmstrip."""
+    ih, iw    = image.shape[:2]
+    sw, sh    = _get_screen_size()
+    os_chrome = 72
+    avail_w   = (sw - _CTRL_W - _BORDER * 6) // 2
+    avail_h   = sh - _BORDER * 4 - os_chrome
+    scale     = min(avail_w / max(iw, 1), avail_h / max(ih, 1))
+    return max(1, int(iw * scale)), max(1, int(ih * scale))
 
 
 def _pad_to_height(img: np.ndarray, h: int) -> np.ndarray:
@@ -695,28 +748,17 @@ def _generate_thumbnail(inv_gray: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(canvas, cv2.COLOR_GRAY2BGR)
 
 
-def _auto_take_zero(state: _EdgemapState) -> None:
-    """Record Take 0 — the initial thresholds at session open — automatically.
-
-    This is called once on a fresh session (no initial_takes_data).  It is
-    never written to disk as an edge file, but is stored in the session JSON
-    so the filmstrip can show it on re-entry.
-    """
-    global_vals = tuple(sl.value for sl in state.sliders)
-    inv_gray    = compute_lab_edges(state.warped_display, *global_vals)
-    thumb       = _generate_thumbnail(inv_gray)
-    state.takes.append(_TakeEntry(
-        index             = 0,
-        edges_full        = None,      # never written to disk
-        display_inv_gray  = inv_gray,
-        global_thresholds = global_vals,
-        local_info        = None,
-        seeded_from       = None,
-        base_image        = "master",
-        thumbnail         = thumb,
-        patches_snapshot  = [],
-        is_new            = True,
-    ))
+def _generate_color_thumbnail(bgr: np.ndarray) -> np.ndarray:
+    """Scale a BGR color image to filmstrip thumbnail size."""
+    h, w   = bgr.shape[:2]
+    scale  = _FILM_THUMB_H / max(1, h)
+    new_w  = max(1, int(round(w * scale)))
+    small  = cv2.resize(bgr, (new_w, _FILM_THUMB_H), interpolation=cv2.INTER_AREA)
+    canvas = np.full((_FILM_THUMB_H, _FILM_THUMB_W, 3), 50, dtype=np.uint8)
+    x0 = max(0, (_FILM_THUMB_W - new_w) // 2)
+    x1 = min(_FILM_THUMB_W, x0 + new_w)
+    canvas[:, x0:x1] = small[:, :x1 - x0]
+    return canvas
 
 
 # ---------------------------------------------------------------------------
@@ -855,6 +897,8 @@ def _make_local_sliders_from_thresholds(thresholds: tuple) -> list:
 
 
 def _enter_local_mode(state: _EdgemapState, disp_x: int, disp_y: int) -> None:
+    if not state.has_take_zero:
+        return   # locked until Take-0 established
     for i in range(len(state.patches) - 1, -1, -1):
         patch = state.patches[i]
         if patch["mask"][disp_y, disp_x] > 0:
@@ -1292,149 +1336,260 @@ def _restore_super_areas_from_session(super_areas_data: list) -> list:
 # Filmstrip — rendering and interaction
 # ---------------------------------------------------------------------------
 
-def _make_filmstrip_panel(state: _EdgemapState, total_w: int) -> np.ndarray:
-    """Render the horizontal Take filmstrip below the main editor panels.
 
-    Layout (left → right):
-      [ORIG/T1/T2 … thumbnails] … [SEED (if preview active)]  [LIVE]
+def _draw_info_panel(state: "_EdgemapState", panel_h: int) -> np.ndarray:
+    """Secondary column: Take details, Lab bars, color swatches."""
+    W = _CTRL2_W
+    P = np.full((panel_h, W, 3), 22, dtype=np.uint8)
 
-    The strip is dimmed and non-interactive while local mode is active —
-    click the EXIT LOCAL button or press Esc first.
-    """
+    def lbl(txt, y, col=(140,140,140), sc=0.40):
+        cv2.putText(P, txt, (8, y), cv2.FONT_HERSHEY_SIMPLEX, sc, col, 1, cv2.LINE_AA)
+    def hline(y):
+        cv2.line(P, (6, y), (W-6, y), (50,50,50), 1)
+
+    if not state.has_take_zero:
+        cv2.rectangle(P, (0,0), (W,24), (30,30,90), -1)
+        cv2.putText(P, "No T0 yet", (6,17), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (180,180,255), 1, cv2.LINE_AA)
+        my = 44
+        for line in ["Tune Lab sliders,", "then press TAKE", "to set T0.", "",
+                     "Local, merge,", "colorize unlock", "after T0."]:
+            lbl(line, my, col=(100,100,160)); my += 18
+        return P
+
+    sel = state.preview_take_idx
+    entry = next((t for t in state.takes if t.index == sel), None) if sel is not None else None
+    hdr = "LIVE" if sel is None else ("T0" if sel == 0 else f"T{sel}")
+    hdr_col = (35,130,35) if sel is None else _AMBER
+    thresh = (entry.global_thresholds if entry else tuple(sl.value for sl in state.sliders))
+
+    cv2.rectangle(P, (0,0), (W,24), hdr_col, -1)
+    cv2.putText(P, hdr, (8,17), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255,255,255), 1, cv2.LINE_AA)
+    if entry and entry.seeded_from is not None:
+        sf = f"\u2192T{entry.seeded_from}"
+        (tw,_),_ = cv2.getTextSize(sf, cv2.FONT_HERSHEY_SIMPLEX, 0.32, 1)
+        cv2.putText(P, sf, (W-tw-6,17), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (180,180,180), 1, cv2.LINE_AA)
+    y = 30
+
+    hline(y); y += 6
+    for i,(nm,col) in enumerate(zip(("L*","a*","b*"),((180,180,180),(80,230,100),(50,230,240)))):
+        lo = thresh[i*2]; hi = thresh[i*2+1]
+        lbl(f"{nm} {lo}-{hi}", y+11, col=col)
+        bx0,bx1 = W-68, W-8
+        cv2.line(P,(bx0,y+7),(bx1,y+7),(50,50,50),6)
+        p0 = bx0+int(lo/255*(bx1-bx0)); p1 = bx0+int(hi/255*(bx1-bx0))
+        cv2.line(P,(p0,y+7),(p1,y+7),col,4)
+        y += 20
+    y += 4
+
+    hline(y); y += 4
+    lbl(f"patches: {len(state.patches)}", y+12, col=_AMBER if state.patches else (70,70,70))
+    lbl(f"super-areas: {len(state.super_areas)}", y+26, col=_MERGE_GREEN if state.super_areas else (60,60,60))
+    y += 36
+
+    # Color versions for selected Take
+    if entry is not None and entry.color_versions:
+        hline(y); y += 4
+        cv2.rectangle(P,(0,y),(W,y+20),(60,30,70),-1)
+        cv2.putText(P,"COLOR VERSIONS",(6,y+14),cv2.FONT_HERSHEY_SIMPLEX,0.38,(200,200,200),1,cv2.LINE_AA)
+        y += 22
+        TH, TW2 = 38, 54
+        for cv_rec in entry.color_versions:
+            if y+TH+8 > panel_h-4:
+                lbl("+more", y+12, col=(80,80,80)); break
+            vid = cv_rec.get("version_id","?")
+            is_sel = (state.preview_color_ver_id == vid)
+            bdr = _ROSE if is_sel else (60,40,60)
+            thumb = cv_rec.get("thumbnail")
+            if thumb is not None:
+                try:
+                    th_s = cv2.resize(thumb,(TW2,TH),interpolation=cv2.INTER_AREA)
+                    P[y:y+TH, 8:8+TW2] = th_s
+                    cv2.rectangle(P,(7,y-1),(8+TW2,y+TH),bdr,1)
+                except Exception:
+                    pass
+            lbl(f"C{vid}", y+13, col=_ROSE if is_sel else (160,120,180), sc=0.42)
+            ts = cv_rec.get("timestamp","")[:10]
+            if ts: lbl(ts, y+27, col=(80,80,80), sc=0.34)
+            y += TH+8
+    return P
+
+
+def _make_filmstrip_panel(state: "_EdgemapState", total_w: int) -> np.ndarray:
+    """Two-row filmstrip: Takes (top) + Color versions (bottom)."""
     panel  = np.full((_FILM_H, total_w, 3), 18, dtype=np.uint8)
     dimmed = state.local_mode or state.merge_mode
 
-    # Separator at top of strip
-    cv2.line(panel, (0, 0), (total_w, 0), (55, 55, 55), 1)
+    cv2.line(panel, (0,0),           (total_w,0),           (55,55,55), 1)
+    cv2.line(panel, (0,_FILM_ROW_H), (total_w,_FILM_ROW_H), (40,40,40), 1)
 
-    thumb_y = (_FILM_H - _FILM_THUMB_H - 16) // 2   # vertical start of thumbnail
+    ty0    = (_FILM_ROW_H - _FILM_THUMB_H - 16) // 2
+    ty1    = _FILM_ROW_H + ty0
+    btn_rx = total_w - _FILM_SEED_R - _FILM_BTN_W//2 - 12
 
-    # Compute available width for thumbnails (leave room for buttons on the right)
-    btn_region_x = total_w - _FILM_SEED_R - _FILM_BTN_W // 2 - 12
-
+    # Row 0: Takes
     for i, entry in enumerate(state.takes):
-        slot_x  = _FILM_START_X + i * _FILM_SLOT_W
-        thumb_x = slot_x + (_FILM_SLOT_W - _FILM_THUMB_W) // 2
-
-        if thumb_x + _FILM_THUMB_W > btn_region_x:
-            # Would overlap buttons; clip remaining (scroll not yet implemented)
-            more = len(state.takes) - i
-            if more > 0:
-                cv2.putText(panel, f"+{more} more",
-                            (btn_region_x - 60, _FILM_H // 2 + 5),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.38, (80, 80, 80), 1, cv2.LINE_AA)
-            break
-
-        is_selected = (not dimmed) and (state.preview_take_idx == entry.index)
-        border_col  = _AMBER if is_selected else (50, 50, 50)
-        cv2.rectangle(panel,
-                      (thumb_x - 2, thumb_y - 2),
-                      (thumb_x + _FILM_THUMB_W + 1, thumb_y + _FILM_THUMB_H + 1),
-                      border_col, 1 if not is_selected else 2)
-
-        # Paste thumbnail
-        roi    = panel[thumb_y : thumb_y + _FILM_THUMB_H, thumb_x : thumb_x + _FILM_THUMB_W]
-        thumb  = entry.thumbnail
-        region = thumb[:_FILM_THUMB_H, :_FILM_THUMB_W]
-        if dimmed:
-            roi[:] = (region.astype(np.float32) * 0.35).astype(np.uint8)
-        else:
-            roi[:] = region
-
-        # Label below thumbnail
-        label     = "ORIG" if entry.index == 0 else f"T{entry.index}"
-        seeded_lbl = f"\u2192T{entry.seeded_from}" if entry.seeded_from is not None else ""
-        label_col = _AMBER if is_selected else ((60, 60, 60) if dimmed else (130, 130, 130))
-        (lw, _), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
-        lx = thumb_x + (_FILM_THUMB_W - lw) // 2
-        ly = thumb_y + _FILM_THUMB_H + 12
-        cv2.putText(panel, label, (lx, ly),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, label_col, 1, cv2.LINE_AA)
-        # seeded-from annotation in smaller text below label
-        if seeded_lbl and not dimmed:
-            (sw, _), _ = cv2.getTextSize(seeded_lbl, cv2.FONT_HERSHEY_SIMPLEX, 0.30, 1)
-            sx_ = thumb_x + (_FILM_THUMB_W - sw) // 2
-            cv2.putText(panel, seeded_lbl, (sx_, ly + 12),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.30, (80, 100, 120), 1, cv2.LINE_AA)
+        sx = _FILM_START_X + i*_FILM_SLOT_W
+        tx = sx + (_FILM_SLOT_W - _FILM_THUMB_W) // 2
+        if tx+_FILM_THUMB_W > btn_rx:
+            cv2.putText(panel, f"+{len(state.takes)-i} more",
+                        (btn_rx-60, _FILM_ROW_H//2+5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.38, (80,80,80), 1, cv2.LINE_AA); break
+        sel  = (not dimmed) and (state.preview_take_idx == entry.index)
+        cv2.rectangle(panel,(tx-2,ty0-2),(tx+_FILM_THUMB_W+1,ty0+_FILM_THUMB_H+1),
+                      _AMBER if sel else (50,50,50), 2 if sel else 1)
+        roi = panel[ty0:ty0+_FILM_THUMB_H, tx:tx+_FILM_THUMB_W]
+        src = entry.thumbnail[:_FILM_THUMB_H, :_FILM_THUMB_W]
+        roi[:] = (src.astype(np.float32)*0.35).astype(np.uint8) if dimmed else src
+        lbl2 = "T0" if entry.index==0 else f"T{entry.index}"
+        lc   = _AMBER if sel else ((60,60,60) if dimmed else (130,130,130))
+        (lw,_),_ = cv2.getTextSize(lbl2, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
+        cv2.putText(panel, lbl2, (tx+(_FILM_THUMB_W-lw)//2, ty0+_FILM_THUMB_H+12),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, lc, 1, cv2.LINE_AA)
+        if entry.seeded_from is not None and not dimmed:
+            sf = f"\u2192T{entry.seeded_from}"
+            (sw2,_),_ = cv2.getTextSize(sf, cv2.FONT_HERSHEY_SIMPLEX, 0.30, 1)
+            cv2.putText(panel, sf, (tx+(_FILM_THUMB_W-sw2)//2, ty0+_FILM_THUMB_H+24),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.30, (80,100,120), 1, cv2.LINE_AA)
 
     if dimmed:
-        hint = "Exit merge/local mode to navigate Takes" if state.merge_mode else "Exit local mode to navigate Takes"
-        (hw, _), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
-        cv2.putText(panel, hint,
-                    (total_w // 2 - hw // 2, _FILM_H // 2 + 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (55, 55, 55), 1, cv2.LINE_AA)
+        msg = "Exit merge/local mode to navigate Takes"
+        (hw,_),_ = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 0.40, 1)
+        cv2.putText(panel, msg, (total_w//2-hw//2, _FILM_ROW_H//2+5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.40, (55,55,55), 1, cv2.LINE_AA)
         return panel
 
-    # LIVE button
-    live_cx  = total_w - _FILM_LIVE_R
-    live_col = (35, 130, 35) if state.preview_take_idx is None else (50, 50, 50)
-    _draw_button(panel, "LIVE", live_cx, _FILM_BTN_CY, live_col, _FILM_BTN_W, _FILM_BTN_H)
-
-    # SEED button — only shown when a Take is selected for preview
+    # LIVE / SEED buttons
+    live_cx = total_w - _FILM_LIVE_R
+    _draw_button(panel, "LIVE", live_cx, _FILM_BTN_CY,
+                 (35,130,35) if state.preview_take_idx is None else (50,50,50),
+                 _FILM_BTN_W, _FILM_BTN_H)
     if state.preview_take_idx is not None:
-        seed_cx  = total_w - _FILM_SEED_R
+        seed_cx = total_w - _FILM_SEED_R
         _draw_button(panel, "SEED", seed_cx, _FILM_BTN_CY,
-                     (0, 100, 180), _FILM_BTN_W, _FILM_BTN_H)
-        lbl = "ORIG" if state.preview_take_idx == 0 else f"T{state.preview_take_idx}"
-        sub = f"load {lbl} values"
-        (sw, _), _ = cv2.getTextSize(sub, cv2.FONT_HERSHEY_SIMPLEX, 0.33, 1)
-        cv2.putText(panel, sub,
-                    (seed_cx - sw // 2, _FILM_BTN_CY + _FILM_BTN_H // 2 + 14),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.33, (90, 140, 190), 1, cv2.LINE_AA)
+                     (0,100,180), _FILM_BTN_W, _FILM_BTN_H)
+
+    # Row 1: Color versions for selected Take
+    sel_idx   = state.preview_take_idx
+    sel_entry = next((t for t in state.takes if t.index == sel_idx), None) if sel_idx is not None else None
+    if sel_entry is not None:
+        cvs = sel_entry.color_versions
+        for j, cv_rec in enumerate(cvs):
+            sx2 = _FILM_START_X + j*_FILM_SLOT_W
+            tx2 = sx2 + (_FILM_SLOT_W - _FILM_THUMB_W) // 2
+            if tx2+_FILM_THUMB_W > btn_rx:
+                cv2.putText(panel, f"+{len(cvs)-j} more",
+                            (btn_rx-60, _FILM_ROW_H+_FILM_ROW_H//2+5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.38, (80,80,80), 1, cv2.LINE_AA); break
+            vid = cv_rec.get("version_id", j)
+            cv_sel = (state.preview_color_ver_id == vid)
+            cv2.rectangle(panel,(tx2-2,ty1-2),(tx2+_FILM_THUMB_W+1,ty1+_FILM_THUMB_H+1),
+                          _ROSE if cv_sel else (60,40,60), 2 if cv_sel else 1)
+            thumb = cv_rec.get("thumbnail")
+            if thumb is not None:
+                try:
+                    panel[ty1:ty1+_FILM_THUMB_H, tx2:tx2+_FILM_THUMB_W] =                         thumb[:_FILM_THUMB_H, :_FILM_THUMB_W]
+                except Exception:
+                    pass
+            (lw,_),_ = cv2.getTextSize(f"C{vid}", cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
+            cv2.putText(panel, f"C{vid}",
+                        (tx2+(_FILM_THUMB_W-lw)//2, ty1+_FILM_THUMB_H+12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.38,
+                        _ROSE if cv_sel else (100,70,120), 1, cv2.LINE_AA)
+        # COLORIZE button
+        clr_cx = total_w - _FILM_CLR_R
+        clr_col = _ROSE if state.has_take_zero else (60,40,60)
+        _draw_button(panel, "COLORIZE", clr_cx, _FILM_CLR_CY, clr_col, 88, _FILM_BTN_H)
+    else:
+        hint3 = "Select a Take to colorize"
+        (hw,_),_ = cv2.getTextSize(hint3, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
+        cv2.putText(panel, hint3, (total_w//2-hw//2, _FILM_ROW_H+_FILM_ROW_H//2+5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (55,55,55), 1, cv2.LINE_AA)
 
     return panel
 
 
-def _seed_from_take(state: _EdgemapState, take_idx: int) -> None:
-    """Load a Take's global thresholds into the working sliders.
-
-    This is the explicit 'seed' action — loading a prior Take's thresholds
-    as a starting point.  The index is recorded in *state.seeded_from* so
-    the next new Take can store the provenance in its metadata.
-    """
+def _seed_from_take(state: "_EdgemapState", take_idx: int) -> None:
     entry = next((t for t in state.takes if t.index == take_idx), None)
     if entry is None:
         return
     for sl, val in zip(state.sliders, entry.global_thresholds):
         sl.value = val
-    state.seeded_from      = take_idx
-    state.preview_take_idx = None
-    state.edges_dirty      = True
+    state.seeded_from = take_idx
+    state.edges_dirty = True
 
 
-def _handle_filmstrip_click(state: _EdgemapState, x: int, fy: int) -> None:
-    """Process a mouse click in the filmstrip area.
+def _handle_filmstrip_click(state: "_EdgemapState", x: int, raw_y: int) -> None:
+    """raw_y is relative to filmstrip top."""
+    if not state.takes:
+        return
+    in_top = raw_y < _FILM_ROW_H
+    fy_top = raw_y
+    fy_bot = raw_y - _FILM_ROW_H
 
-    *x*  is the window x coordinate.
-    *fy* is y relative to the top of the filmstrip strip.
-    """
-    if state.window_w > 0:
-        # LIVE button
-        live_cx = state.window_w - _FILM_LIVE_R
-        if _hit_button(x, fy, live_cx, _FILM_BTN_CY, _FILM_BTN_W, _FILM_BTN_H):
-            state.preview_take_idx = None
-            state.edges_dirty      = True
-            return
-
-        # SEED button (only active when a preview is selected)
-        if state.preview_take_idx is not None:
-            seed_cx = state.window_w - _FILM_SEED_R
-            if _hit_button(x, fy, seed_cx, _FILM_BTN_CY, _FILM_BTN_W, _FILM_BTN_H):
-                _seed_from_take(state, state.preview_take_idx)
+    if in_top:
+        if state.window_w > 0:
+            # LIVE button
+            live_cx = state.window_w - _FILM_LIVE_R
+            if _hit_button(x, fy_top, live_cx, _FILM_BTN_CY, _FILM_BTN_W, _FILM_BTN_H):
+                if state.pre_seed_values is not None:
+                    for sl, v in zip(state.sliders, state.pre_seed_values):
+                        sl.value = v
+                    state.pre_seed_values = None
+                state.preview_take_idx    = None
+                state.preview_color_ver_id = None
+                state.edges_dirty         = True
                 return
+            # SEED: explicit "keep these values and deselect"
+            if state.preview_take_idx is not None:
+                seed_cx = state.window_w - _FILM_SEED_R
+                if _hit_button(x, fy_top, seed_cx, _FILM_BTN_CY, _FILM_BTN_W, _FILM_BTN_H):
+                    state.pre_seed_values  = None   # commit — no revert
+                    state.preview_take_idx = None
+                    state.edges_dirty      = True
+                    return
 
-    # Thumbnail slot hit test
+        if x >= _FILM_START_X:
+            slot = (x - _FILM_START_X) // _FILM_SLOT_W
+            if 0 <= slot < len(state.takes):
+                entry = state.takes[slot]
+                if state.preview_take_idx == entry.index:
+                    # Deselect — restore sliders
+                    if state.pre_seed_values is not None:
+                        for sl, v in zip(state.sliders, state.pre_seed_values):
+                            sl.value = v
+                        state.pre_seed_values = None
+                    state.preview_take_idx    = None
+                    state.preview_color_ver_id = None
+                    state.edges_dirty         = True
+                else:
+                    # Select — store current values, seed sliders to this Take
+                    if state.preview_take_idx is None:
+                        state.pre_seed_values = [sl.value for sl in state.sliders]
+                    state.preview_take_idx    = entry.index
+                    state.preview_color_ver_id = None
+                    _seed_from_take(state, entry.index)
+        return
+
+    # Bottom row
+    if not state.has_take_zero or state.preview_take_idx is None:
+        return
+    sel_entry = next((t for t in state.takes if t.index == state.preview_take_idx), None)
+    if sel_entry is None:
+        return
+    # COLORIZE button
+    if state.window_w > 0:
+        clr_cx = state.window_w - _FILM_CLR_R
+        if _hit_button(x, fy_bot, clr_cx, _FILM_BTN_CY, 88, _FILM_BTN_H):
+            state.colorize_take_idx = state.preview_take_idx
+            state.done = True
+            return
+    # Color version thumbnail
     if x >= _FILM_START_X:
         slot = (x - _FILM_START_X) // _FILM_SLOT_W
-        if 0 <= slot < len(state.takes):
-            entry = state.takes[slot]
-            if state.preview_take_idx == entry.index:
-                # Click on already-selected thumbnail → deselect (back to live)
-                state.preview_take_idx = None
-                state.edges_dirty      = True
-            else:
-                state.preview_take_idx = entry.index
-                # No edges_dirty — preview reuses stored display_inv_gray
+        cvs  = sel_entry.color_versions
+        if 0 <= slot < len(cvs):
+            vid = cvs[slot].get("version_id")
+            state.preview_color_ver_id = None if state.preview_color_ver_id == vid else vid
 
 
 # ---------------------------------------------------------------------------
@@ -1444,7 +1599,9 @@ def _handle_filmstrip_click(state: _EdgemapState, x: int, fy: int) -> None:
 def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
     state: _EdgemapState = param
     ep_w = state.warped_display.shape[1] + 2 * _BORDER
-    on_edge_panel = (_CTRL_W <= x < _CTRL_W + ep_w)
+    # Edge panel starts after BOTH control columns
+    _EP_X  = _CTRL_W + _CTRL2_W
+    on_edge_panel = (_EP_X <= x < _EP_X + ep_w)
 
     # ---- RIGHT-CLICK -------------------------------------------------------
     if event == cv2.EVENT_RBUTTONDOWN:
@@ -1452,7 +1609,7 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
             return   # ignore in filmstrip
         if on_edge_panel:
             dh, dw = state.warped_display.shape[:2]
-            disp_x = max(0, min(x - _CTRL_W - _BORDER, dw - 1))
+            disp_x = max(0, min(x - _EP_X - _BORDER, dw - 1))
             disp_y = max(0, min(y - _BORDER, dh - 1))
             if state.local_mode:
                 # Cancel local selection without committing
@@ -1583,7 +1740,7 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
         elif on_edge_panel:
             # ---- Edge panel click ------------------------------------------
             dh, dw = state.warped_display.shape[:2]
-            disp_x = max(0, min(x - _CTRL_W - _BORDER, dw - 1))
+            disp_x = max(0, min(x - _EP_X - _BORDER, dw - 1))
             disp_y = max(0, min(y - _BORDER, dh - 1))
 
             if state.merge_mode:
@@ -1597,8 +1754,15 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
                 if state.preview_take_idx is None:
                     _enter_local_mode(state, disp_x, disp_y)
                 else:
-                    state.preview_take_idx = None
-                    state.edges_dirty      = True
+                    # Deselect Take — restore sliders to pre-selection values
+                    if state.pre_seed_values is not None:
+                        for sl, v in zip(state.sliders, state.pre_seed_values):
+                            sl.value = v
+                        state.pre_seed_values = None
+                    state.preview_take_idx    = None
+                    state.preview_color_ver_id = None
+                    state.edges_dirty         = True
+                    # Do NOT enter local mode on this same click
 
     # ---- MOUSE MOVE --------------------------------------------------------
     elif event == cv2.EVENT_MOUSEMOVE:
@@ -1693,13 +1857,418 @@ def _do_take(state: _EdgemapState) -> None:
         global_thresholds = global_vals,
         local_info        = local_info,
         seeded_from       = state.seeded_from,
-        base_image        = "master",
+        base_image        = state.base_image,
         thumbnail         = thumb,
         patches_snapshot  = _patches_to_session_data(state.patches),
         is_new            = True,
     )
     state.takes.append(entry)
+    state.has_take_zero    = True   # first Take establishes ground truth
     state.preview_take_idx = None   # return to live view after taking
+
+
+# ===========================================================================
+# Colorize editor  (Phase 3)
+# ===========================================================================
+
+@dataclass
+class _ColorizeState:
+    warped_full:     np.ndarray   # full-res base image
+    warped_display:  np.ndarray   # display-res base image
+    take_inv_gray:   np.ndarray   # display-res composite edge map from the Take
+    inv_gray_full:   np.ndarray   # full-res composite edge map for final write
+    lab_patches:     list         # display-res patches for region resolution
+    super_areas:     list
+    sliders:         list         # H target, S target, V scale %
+    painted_display: np.ndarray = field(default_factory=lambda: np.zeros((1,1,3), np.uint8))
+    pending_mask:    Optional[np.ndarray] = None
+    pending_seed:    Optional[tuple]      = None
+    dominant_hsv:    Optional[tuple]      = None
+    local_seal:      int  = _SEAL_DEFAULT
+    committed:       list = field(default_factory=list)
+    done:            bool = False
+    saved:           bool = False
+    left_dirty:      bool = True
+    right_dirty:     bool = True
+    left_panel:      Optional[np.ndarray] = None
+    right_panel:     Optional[np.ndarray] = None
+    drag_idx:        Optional[int] = None
+
+
+def _resolve_clr_mask(cs: _ColorizeState, dx: int, dy: int) -> Optional[np.ndarray]:
+    """SA > standalone patch > flood fill against Take composite edge map."""
+    for sa in cs.super_areas:
+        combined = None
+        for pid in sa["patch_ids"]:
+            p = next((p for p in cs.lab_patches if p.get("patch_id") == pid), None)
+            if p is not None:
+                combined = p["mask"] if combined is None else np.maximum(combined, p["mask"])
+        if combined is not None and combined[dy, dx] > 0:
+            return combined.copy()
+    for p in reversed(cs.lab_patches):
+        if p.get("super_area_id") is None and p["mask"][dy, dx] > 0:
+            return p["mask"].copy()
+    return _flood_fill_region(cs.take_inv_gray, dx, dy, seal_px=cs.local_seal)
+
+
+def _apply_hsv_abs(img: np.ndarray, mask: np.ndarray, h_t: int, s_t: int, v_pct: int) -> np.ndarray:
+    """Set H and S absolutely, scale V, only where mask > 0."""
+    out  = img.copy()
+    ys, xs = np.where(mask > 0)
+    if len(ys) == 0:
+        return out
+    hsvf = cv2.cvtColor(out, cv2.COLOR_BGR2HSV).astype(np.float32)
+    hsvf[ys, xs, 0] = float(h_t)
+    hsvf[ys, xs, 1] = float(s_t)
+    hsvf[ys, xs, 2] = np.clip(hsvf[ys, xs, 2] * (v_pct / 100.0), 0, 255)
+    return cv2.cvtColor(np.clip(hsvf, 0, 255).astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+
+def _make_clr_left(cs: _ColorizeState) -> np.ndarray:
+    """Edge map: black-on-white; selected region shows actual painting colors with HSV applied."""
+    img = np.full((*cs.take_inv_gray.shape, 3), (255, 255, 255), dtype=np.uint8)
+    img[cs.take_inv_gray == 0] = (0, 0, 0)
+
+    if cs.pending_mask is not None:
+        # Apply the current HSV adjustment to the actual painting pixels in the region
+        colored = _apply_hsv_abs(cs.warped_display, cs.pending_mask,
+                                  cs.sliders[0].value, cs.sliders[1].value, cs.sliders[2].value)
+        img[cs.pending_mask > 0] = colored[cs.pending_mask > 0]
+        # Subtle outline — only outside the mask, thin 1px, using a neutral dark colour
+        kern    = np.ones((3, 3), np.uint8)
+        dilated = cv2.dilate(cs.pending_mask, kern, iterations=1)
+        img[(dilated > 0) & (cs.pending_mask == 0) & (cs.take_inv_gray > 0)] = (180, 180, 60)
+
+    cv2.rectangle(img, (0, 0), (img.shape[1], 26), (40, 40, 80), -1)
+    cv2.putText(img,
+                f"EDGE  \u2014  click to select region  |  committed: {len(cs.committed)}",
+                (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 255, 255), 1, cv2.LINE_AA)
+    return _add_border(img, _BORDER)
+
+
+def _make_clr_right(cs: _ColorizeState) -> np.ndarray:
+    """Right panel: committed colors only — no pending preview. Updates on Apply."""
+    img = cs.painted_display.copy()
+    cv2.rectangle(img, (0, 0), (img.shape[1], 26), (40, 60, 40), -1)
+    cv2.putText(img, "PAINTED  \u2014  A=apply  S=save  R=reset  Esc=cancel",
+                (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 255, 255), 1, cv2.LINE_AA)
+    return _add_border(img, _BORDER, color=_ROSE)
+
+
+def _draw_clr_ctrl(cs: _ColorizeState) -> np.ndarray:
+    W = _CTRL_W
+    panel = np.full((_CLR_TOTAL_H, W, 3), 28, dtype=np.uint8)
+    cv2.rectangle(panel, (0, 0), (W, _CLR_CTRL_TOP - 4), (80, 40, 120), -1)
+    cv2.putText(panel, "HSV Target", (10, 24),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1, cv2.LINE_AA)
+    for i, sl in enumerate(cs.sliders):
+        ty = _CLR_CTRL_TOP + i * _CLR_BAND_H + 58
+        if i > 0:
+            cv2.line(panel, (10, _CLR_CTRL_TOP + i*_CLR_BAND_H - 6),
+                     (W-10, _CLR_CTRL_TOP + i*_CLR_BAND_H - 6), (60, 60, 60), 1)
+        cv2.putText(panel, sl.label, (_TRACK_X0, ty-26),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.52, sl.color, 1, cv2.LINE_AA)
+        cv2.line(panel, (_TRACK_X0, ty), (_TRACK_X1, ty), (90, 90, 90), 2)
+        for tx2 in (_TRACK_X0, _TRACK_X1):
+            cv2.line(panel, (tx2, ty-5), (tx2, ty+5), (70, 70, 70), 1)
+        hx = sl.handle_x()
+        cv2.circle(panel, (hx, ty), _HANDLE_R, sl.color, -1)
+        cv2.circle(panel, (hx, ty), _HANDLE_R+1, (240, 240, 240), 1)
+        vs = str(sl.value)
+        (tw, _), _ = cv2.getTextSize(vs, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1)
+        cv2.putText(panel, vs, (_TRACK_X1-tw, ty+24),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, (190, 190, 190), 1, cv2.LINE_AA)
+
+    # Dominant color swatch
+    if cs.dominant_hsv is not None:
+        dh, ds, dv = cs.dominant_hsv
+        dbgr = cv2.cvtColor(np.array([[[dh, ds, dv]]], dtype=np.uint8), cv2.COLOR_HSV2BGR)[0, 0]
+        sw_y = _CLR_BTN_CY - 22
+        cv2.rectangle(panel, (W//2-44, sw_y-10), (W//2+44, sw_y+10),
+                      (int(dbgr[0]), int(dbgr[1]), int(dbgr[2])), -1)
+        cv2.rectangle(panel, (W//2-44, sw_y-10), (W//2+44, sw_y+10), (160, 160, 160), 1)
+        info = f"H:{dh}  S:{ds}  V:{dv}"
+        (tw, _), _ = cv2.getTextSize(info, cv2.FONT_HERSHEY_SIMPLEX, 0.32, 1)
+        cv2.putText(panel, info, (W//2-tw//2, sw_y+24),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.32, (140, 140, 140), 1, cv2.LINE_AA)
+
+    _draw_button(panel, "RESET", _CLR_RESET_CX, _CLR_BTN_CY, (90, 90, 30))
+    _draw_button(panel, "APPLY", _CLR_APPLY_CX, _CLR_BTN_CY, (35, 130, 35))
+    _draw_button(panel, "-", _SEAL_MINUS_CX, _CLR_SEAL_ROW_Y, (60,60,80), _SEAL_PBTN_W, _SEAL_PBTN_H)
+    _draw_button(panel, "+", _SEAL_PLUS_CX,  _CLR_SEAL_ROW_Y, (60,60,80), _SEAL_PBTN_W, _SEAL_PBTN_H)
+    st = f"SEAL: {cs.local_seal}"
+    (tw, _), _ = cv2.getTextSize(st, cv2.FONT_HERSHEY_SIMPLEX, 0.46, 1)
+    cv2.putText(panel, st, (W//2-tw//2, _CLR_SEAL_ROW_Y+5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.46, _AMBER, 1, cv2.LINE_AA)
+    _draw_button(panel, "SAVE", W//2, _CLR_SAVE_CY,
+                 (0, 140, 80) if cs.committed else (50, 50, 50), 120, _BTN_H)
+    if cs.committed:
+        _draw_button(panel, "CLR ALL", W//2, _CLR_CLR_CY, (60, 40, 40), 120, _SEAL_PBTN_H)
+    elif cs.pending_mask is not None:
+        ht = "Adjust HSV then APPLY"
+        (tw, _), _ = cv2.getTextSize(ht, cv2.FONT_HERSHEY_SIMPLEX, 0.36, 1)
+        cv2.putText(panel, ht, (W//2-tw//2, _CLR_CLR_CY+5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.36, _AMBER, 1, cv2.LINE_AA)
+    else:
+        ht2 = "Click edge map to select"
+        (tw, _), _ = cv2.getTextSize(ht2, cv2.FONT_HERSHEY_SIMPLEX, 0.36, 1)
+        cv2.putText(panel, ht2, (W//2-tw//2, _CLR_CLR_CY+5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.36, (70, 70, 70), 1, cv2.LINE_AA)
+    return panel
+
+
+def _clr_apply(cs: _ColorizeState) -> None:
+    if cs.pending_mask is None:
+        return
+    h, w = cs.warped_display.shape[:2]
+    sx, sy = cs.pending_seed
+    cs.painted_display = _apply_hsv_abs(
+        cs.painted_display, cs.pending_mask,
+        cs.sliders[0].value, cs.sliders[1].value, cs.sliders[2].value)
+    cs.committed.append({
+        "seed_norm": (sx / max(1,w), sy / max(1,h)),
+        "seal": cs.local_seal,
+        "hsv": (cs.sliders[0].value, cs.sliders[1].value, cs.sliders[2].value),
+    })
+    cs.pending_mask = None; cs.pending_seed = None; cs.dominant_hsv = None
+    for sl, d in zip(cs.sliders, _CLR_SLIDER_DEFS): sl.value = d[3]
+    cs.left_dirty = cs.right_dirty = True
+
+
+def _clr_rerun(cs: _ColorizeState) -> None:
+    if cs.pending_seed is None: return
+    sx, sy = cs.pending_seed
+    m = _resolve_clr_mask(cs, sx, sy)
+    if m is not None:
+        cs.pending_mask = m; cs.left_dirty = cs.right_dirty = True
+
+
+def _colorize_mouse(event: int, x: int, y: int, flags: int, param) -> None:
+    cs: _ColorizeState = param
+    lw    = cs.take_inv_gray.shape[1] + 2 * _BORDER
+    on_L  = (_CTRL_W <= x < _CTRL_W + lw)
+    on_R  = (_CTRL_W + lw <= x)
+
+    if event == cv2.EVENT_RBUTTONDOWN and on_R and cs.committed:
+        # Remove last committed region and rebuild
+        cs.committed.pop()
+        cs.painted_display = cs.warped_display.copy()
+        for rec in cs.committed:
+            nx, ny = rec["seed_norm"]
+            dh2, dw2 = cs.take_inv_gray.shape[:2]
+            sx2 = max(0, min(int(round(nx*dw2)), dw2-1))
+            sy2 = max(0, min(int(round(ny*dh2)), dh2-1))
+            m2 = _resolve_clr_mask(cs, sx2, sy2)
+            if m2 is not None:
+                cs.painted_display = _apply_hsv_abs(cs.painted_display, m2, *rec["hsv"])
+        cs.right_dirty = True
+
+    elif event == cv2.EVENT_LBUTTONDOWN:
+        if x < _CTRL_W:
+            for i, sl in enumerate(cs.sliders):
+                ty = _CLR_CTRL_TOP + i * _CLR_BAND_H + 58
+                if (x-sl.handle_x())**2 + (y-ty)**2 <= (_HANDLE_R+5)**2:
+                    cs.drag_idx = i; return
+            if _hit_button(x, y, _CLR_RESET_CX, _CLR_BTN_CY):
+                for sl, d in zip(cs.sliders, _CLR_SLIDER_DEFS): sl.value = d[3]
+                cs.left_dirty = cs.right_dirty = True
+            elif _hit_button(x, y, _CLR_APPLY_CX, _CLR_BTN_CY): _clr_apply(cs)
+            elif _hit_button(x, y, _SEAL_MINUS_CX, _CLR_SEAL_ROW_Y, _SEAL_PBTN_W, _SEAL_PBTN_H):
+                cs.local_seal = max(_SEAL_MIN, cs.local_seal-1); _clr_rerun(cs)
+            elif _hit_button(x, y, _SEAL_PLUS_CX, _CLR_SEAL_ROW_Y, _SEAL_PBTN_W, _SEAL_PBTN_H):
+                cs.local_seal = min(_SEAL_MAX, cs.local_seal+1); _clr_rerun(cs)
+            elif _hit_button(x, y, _CTRL_W//2, _CLR_SAVE_CY, 120, _BTN_H):
+                if cs.committed: cs.saved = True; cs.done = True
+            elif cs.committed and _hit_button(x, y, _CTRL_W//2, _CLR_CLR_CY, 120, _SEAL_PBTN_H):
+                cs.committed.clear()
+                cs.painted_display = cs.warped_display.copy()
+                cs.pending_mask = None; cs.pending_seed = None; cs.dominant_hsv = None
+                cs.left_dirty = cs.right_dirty = True
+        elif on_L:
+            dh2, dw2 = cs.take_inv_gray.shape[:2]
+            dx = max(0, min(x - _CTRL_W - _BORDER, dw2-1))
+            dy = max(0, min(y - _BORDER, dh2-1))
+            mask = _resolve_clr_mask(cs, dx, dy)
+            if mask is not None:
+                ys, xs = np.where(mask > 0)
+                if len(ys) > 0:
+                    hsv_img = cv2.cvtColor(cs.warped_display, cv2.COLOR_BGR2HSV)
+                    h_vals  = hsv_img[ys, xs, 0].astype(np.float32)
+                    s_vals  = hsv_img[ys, xs, 1].astype(np.float32)
+                    v_vals  = hsv_img[ys, xs, 2].astype(np.float32)
+                    h_sin   = float(np.mean(np.sin(h_vals * np.pi / 90.0)))
+                    h_cos   = float(np.mean(np.cos(h_vals * np.pi / 90.0)))
+                    dom_h   = int(np.degrees(np.arctan2(h_sin, h_cos)) * 90.0 / 180.0) % 180
+                    dom_s   = int(np.median(s_vals))
+                    dom_v   = int(np.median(v_vals))
+                    cs.sliders[0].value = dom_h
+                    cs.sliders[1].value = dom_s
+                    cs.sliders[2].value = 100
+                    cs.dominant_hsv = (dom_h, dom_s, dom_v)
+                cs.pending_mask = mask; cs.pending_seed = (dx, dy)
+                cs.left_dirty = cs.right_dirty = True
+
+    elif event == cv2.EVENT_MOUSEMOVE and cs.drag_idx is not None:
+        sl = cs.sliders[cs.drag_idx]
+        nv = sl.value_from_x(x)
+        if nv != sl.value:
+            sl.value = nv; cs.left_dirty = cs.right_dirty = True
+
+    elif event == cv2.EVENT_LBUTTONUP:
+        cs.drag_idx = None
+
+
+def _committed_to_session_data(committed: list) -> list:
+    return [{"seed_norm": list(r["seed_norm"]), "seal": r["seal"], "hsv": list(r["hsv"])}
+            for r in committed]
+
+
+def _apply_color_full_res(
+    base_full: np.ndarray,
+    inv_gray_full: np.ndarray,
+    committed: list,
+    full_lab_patches: list,
+    super_areas: list,
+) -> np.ndarray:
+    out = base_full.copy()
+    for rec in committed:
+        try:
+            nx, ny = rec["seed_norm"]; seal = int(rec.get("seal", _SEAL_DEFAULT))
+            h_t, s_t, v_pct = rec["hsv"]
+            h_f, w_f = out.shape[:2]
+            sx = max(0, min(int(round(nx*w_f)), w_f-1))
+            sy = max(0, min(int(round(ny*h_f)), h_f-1))
+            mask = None
+            for sa in super_areas:
+                comb = None
+                for pid in sa["patch_ids"]:
+                    p = next((p for p in full_lab_patches if p.get("patch_id")==pid), None)
+                    if p is not None:
+                        comb = p["mask"] if comb is None else np.maximum(comb, p["mask"])
+                if comb is not None and comb[sy, sx] > 0:
+                    mask = comb; break
+            if mask is None:
+                for p in reversed(full_lab_patches):
+                    if p.get("super_area_id") is None and p["mask"][sy,sx] > 0:
+                        mask = p["mask"]; break
+            if mask is None:
+                mask = _flood_fill_region(inv_gray_full, sx, sy, seal_px=seal)
+            out = _apply_hsv_abs(out, mask, h_t, s_t, v_pct)
+        except Exception as exc:
+            print(f"[WARN] colorize full-res: {exc!r}")
+    return out
+
+
+def edit_colorize(
+    warped_full: np.ndarray,
+    take_inv_gray_disp: np.ndarray,
+    take_inv_gray_full: np.ndarray,
+    lab_patches: list,
+    super_areas: list,
+    base_display: np.ndarray | None = None,
+    base_full: np.ndarray | None = None,
+    initial_committed: list | None = None,
+) -> tuple[np.ndarray | None, list]:
+    """Two-panel colorize editor.
+    Left:  Take's composite edge map — click to select region, shows HSV preview
+    Right: Cumulative painted image — updated on each APPLY
+
+    Returns (colorized_full, committed_data) or (None, []) if cancelled.
+    """
+    sliders = [
+        _Slider(label=d[0], min_val=d[1], max_val=d[2], value=d[3], color=d[4])
+        for d in _CLR_SLIDER_DEFS
+    ]
+    disp_w, disp_h = _compute_panel_size(warped_full)
+    interp         = cv2.INTER_AREA if disp_w < warped_full.shape[1] else cv2.INTER_LINEAR
+    warped_disp    = cv2.resize(warped_full, (disp_w, disp_h), interpolation=interp)
+    painted_start  = (cv2.resize(base_display, (disp_w, disp_h), interpolation=interp)
+                      if base_display is not None else warped_disp.copy())
+
+    inv_d = cv2.resize(take_inv_gray_disp, (disp_w, disp_h), interpolation=cv2.INTER_NEAREST)
+    disp_patches: list = []
+    for p in (lab_patches or []):
+        sp = dict(p)
+        sp["mask"] = cv2.resize(p["mask"], (disp_w, disp_h), interpolation=cv2.INTER_NEAREST)
+        disp_patches.append(sp)
+
+    cs = _ColorizeState(
+        warped_full    = warped_full,
+        warped_display = warped_disp,
+        take_inv_gray  = inv_d,
+        inv_gray_full  = take_inv_gray_full,
+        lab_patches    = disp_patches,
+        super_areas    = super_areas or [],
+        sliders        = sliders,
+        painted_display = painted_start,
+    )
+
+    if initial_committed:
+        for rec in initial_committed:
+            try:
+                nx, ny = rec["seed_norm"]; seal = int(rec.get("seal", _SEAL_DEFAULT))
+                sx = max(0, min(int(round(nx*disp_w)), disp_w-1))
+                sy = max(0, min(int(round(ny*disp_h)), disp_h-1))
+                m  = _resolve_clr_mask(cs, sx, sy)
+                if m is None: continue
+                h_t, s_t, v_pct = rec["hsv"]
+                cs.painted_display = _apply_hsv_abs(cs.painted_display, m, h_t, s_t, v_pct)
+                cs.committed.append({"seed_norm": (nx,ny), "seal": seal, "hsv": (h_t,s_t,v_pct)})
+            except Exception: continue
+        if cs.committed:
+            print(f"[INFO] Restored {len(cs.committed)} committed color region(s)")
+
+    cv2.namedWindow(_CLR_WINDOW, cv2.WINDOW_NORMAL)
+    cv2.setMouseCallback(_CLR_WINDOW, _colorize_mouse, cs)
+    cs.left_panel  = _make_clr_left(cs)
+    cs.right_panel = _make_clr_right(cs)
+    cs.left_dirty  = cs.right_dirty = False
+    ctrl = _draw_clr_ctrl(cs)
+    bh   = max(ctrl.shape[0], cs.left_panel.shape[0], cs.right_panel.shape[0])
+    cv2.imshow(_CLR_WINDOW, np.hstack([
+        _pad_to_height(ctrl, bh),
+        _pad_to_height(cs.left_panel, bh),
+        _pad_to_height(cs.right_panel, bh)]))
+    cv2.resizeWindow(_CLR_WINDOW,
+                     ctrl.shape[1] + cs.left_panel.shape[1] + cs.right_panel.shape[1], bh)
+    cv2.waitKey(1)
+
+    try:
+        while not cs.done:
+            if cs.left_dirty:
+                cs.left_panel  = _make_clr_left(cs);  cs.left_dirty  = False
+            if cs.right_dirty:
+                cs.right_panel = _make_clr_right(cs); cs.right_dirty = False
+            ctrl = _draw_clr_ctrl(cs)
+            th   = max(ctrl.shape[0], cs.left_panel.shape[0], cs.right_panel.shape[0])
+            cv2.imshow(_CLR_WINDOW, np.hstack([
+                _pad_to_height(ctrl, th),
+                _pad_to_height(cs.left_panel, th),
+                _pad_to_height(cs.right_panel, th)]))
+            key = cv2.waitKey(20) & 0xFF
+            if key in (ord("a"), ord("A")): _clr_apply(cs)
+            elif key in (ord("r"), ord("R")):
+                for sl, d in zip(cs.sliders, _CLR_SLIDER_DEFS): sl.value = d[3]
+                cs.left_dirty = cs.right_dirty = True
+            elif key in (ord("s"), ord("S")):
+                if cs.committed: cs.saved = True; cs.done = True
+            elif key in (27, ord("q"), ord("Q")): cs.done = True
+    finally:
+        cv2.destroyWindow(_CLR_WINDOW)
+
+    if not cs.saved or not cs.committed:
+        return None, []
+
+    print("[INFO] Applying color at full resolution...")
+    h_f, w_f = warped_full.shape[:2]
+    base_fr  = base_full if base_full is not None else warped_full
+    full_pts: list = []
+    for p in (lab_patches or []):
+        fp = dict(p)
+        fp["mask"] = cv2.resize(p["mask"], (w_f, h_f), interpolation=cv2.INTER_NEAREST)
+        full_pts.append(fp)
+    result = _apply_color_full_res(base_fr, cs.inv_gray_full, cs.committed, full_pts, super_areas or [])
+    return result, _committed_to_session_data(cs.committed)
 
 
 # ---------------------------------------------------------------------------
@@ -1714,10 +2283,13 @@ def edit_edgemap(
     a_hi: int = 90,
     b_lo: int = 30,
     b_hi: int = 90,
+    base_image: str = "master",
     initial_patches_data: list | None = None,
     initial_takes_data: list | None = None,
     initial_super_areas_data: list | None = None,
-) -> tuple[list, list, list]:
+    initial_color_versions: dict | None = None,
+    initial_preview_take_idx: int | None = None,
+) -> tuple[list, list, list, Optional[int]]:
     """Open the three-panel Lab edge-map editor.
 
     Global mode
@@ -1782,10 +2354,11 @@ def edit_edgemap(
         master_panel   = master_panel,
         sliders        = sliders,
         initial_values = list(initial_vals),
+        base_image     = base_image,
         edges_dirty    = True,
     )
 
-    # --- Populate filmstrip from prior session, or auto-create Take 0 ------
+    # --- Populate filmstrip from prior session, or leave empty for fresh start ---
     if initial_takes_data:
         for td in initial_takes_data:
             thresholds = (
@@ -1793,24 +2366,37 @@ def edit_edgemap(
                 int(td.get("a_lo", 30)),  int(td.get("a_hi",  90)),
                 int(td.get("b_lo", 30)),  int(td.get("b_hi",  90)),
             )
-            inv_gray = compute_lab_edges(master_scaled, *thresholds)
-            thumb    = _generate_thumbnail(inv_gray)
+            inv_gray  = compute_lab_edges(master_scaled, *thresholds)
+            thumb     = _generate_thumbnail(inv_gray)
+            take_idx  = int(td.get("index", 0))
+            cvs       = (initial_color_versions or {}).get(take_idx, [])
             state.takes.append(_TakeEntry(
-                index             = int(td.get("index", 0)),
-                edges_full        = None,       # already on disk; not needed here
+                index             = take_idx,
+                edges_full        = None,
                 display_inv_gray  = inv_gray,
                 global_thresholds = thresholds,
                 local_info        = td.get("local_region"),
                 seeded_from       = td.get("seeded_from"),
-                base_image        = td.get("base_image", "master"),
+                base_image        = td.get("base_image", base_image),
                 thumbnail         = thumb,
                 patches_snapshot  = [],
                 is_new            = False,
+                color_versions    = cvs,
             ))
+        state.has_take_zero = True
         print(f"[INFO] Filmstrip restored: {len(state.takes)} historical take(s)")
     else:
-        # Fresh session — auto-record the initial state as Take 0
-        _auto_take_zero(state)
+        # Fresh session — user must press TAKE to establish T0
+        state.has_take_zero = False
+
+    # Pre-select a Take (e.g. returning from colorize)
+    if initial_preview_take_idx is not None:
+        entry0 = next((t for t in state.takes if t.index == initial_preview_take_idx), None)
+        if entry0 is not None:
+            state.preview_take_idx = initial_preview_take_idx
+            state.pre_seed_values  = list(initial_vals)
+            for sl, val in zip(state.sliders, entry0.global_thresholds):
+                sl.value = val
 
     # --- Restore committed patches from a previous session ------------------
     if initial_patches_data:
@@ -1829,6 +2415,19 @@ def edit_edgemap(
             state.next_super_area_id = max_said + 1
             print(f"[INFO] Restored {len(state.super_areas)} super-area(s) from session")
 
+    # Recompute historical take display_inv_gray with restored patches/SAs.
+    # On initial load they were computed from global thresholds only.
+    if state.patches or state.super_areas:
+        for take in state.takes:
+            if not take.is_new:
+                take_sliders = [
+                    _Slider(d[0], d[1], d[2], max(d[1], min(d[2], v)), d[4])
+                    for d, v in zip(_SLIDER_DEFS, take.global_thresholds)
+                ]
+                take.display_inv_gray = _compute_composite_inv_gray(
+                    master_scaled, take_sliders, state.patches, state.super_areas)
+                take.thumbnail = _generate_thumbnail(take.display_inv_gray)
+
     cv2.namedWindow(_EDGEMAP_WINDOW, cv2.WINDOW_NORMAL)
     cv2.setMouseCallback(_EDGEMAP_WINDOW, _edgemap_mouse, state)
 
@@ -1839,6 +2438,7 @@ def edit_edgemap(
         state.sliders,
         sum(1 for t in state.takes if t.index > 0),
         state.color_idx, state.overlay_on,
+        has_take_zero=state.has_take_zero,
     )
     state.edge_panel, state.inv_gray_cache = _make_edge_panel(
         state.warped_display, state.sliders, state.color_idx,
@@ -1846,8 +2446,10 @@ def edit_edgemap(
     state.edges_dirty = False
     _bt_h = max(_boot_ctrl.shape[0], state.edge_panel.shape[0], master_panel.shape[0])
     state.main_panel_h = _bt_h
+    _boot_info = _draw_info_panel(state, _bt_h)
     _boot_main = np.hstack([
         _pad_to_height(_boot_ctrl,       _bt_h),
+        _pad_to_height(_boot_info,       _bt_h),
         _pad_to_height(state.edge_panel, _bt_h),
         _pad_to_height(master_panel,     _bt_h),
     ])
@@ -1907,8 +2509,10 @@ def edit_edgemap(
                 merge_sliders=state.merge_sliders if state.merge_mode else None,
                 merge_active_sa_id=state.merge_active_sa_id,
                 super_area_count=len(state.super_areas),
+                has_take_zero=state.has_take_zero,
             )
 
+            # ── Panel selection ───────────────────────────────────────────
             if state.merge_mode:
                 mid_panel   = state.merge_edge_panel if state.merge_edge_panel is not None else state.edge_panel
                 right_panel = state.master_panel
@@ -1916,13 +2520,18 @@ def edit_edgemap(
                 mid_panel   = state.local_edge_panel if state.local_edge_panel is not None else state.edge_panel
                 right_panel = state.local_zoom_panel if state.local_zoom_panel is not None else state.master_panel
             elif state.preview_take_idx is not None:
-                # Show the previewed Take's stored edge map in the middle panel
                 preview_entry = next(
                     (t for t in state.takes if t.index == state.preview_take_idx), None)
                 if preview_entry is not None:
                     mid_panel = _render_inv_gray(preview_entry.display_inv_gray, state.color_idx)
-                    if state.overlay_on:
-                        # Composite THIS Take's edges onto master (not the live working map)
+                    # Right: color version if one is selected, else master (with optional overlay)
+                    if state.preview_color_ver_id is not None:
+                        cv_rec = next(
+                            (c for c in preview_entry.color_versions
+                             if c.get("version_id") == state.preview_color_ver_id), None)
+                        di = cv_rec.get("display_image") if cv_rec else None
+                        right_panel = _add_border(di, _BORDER) if di is not None else state.master_panel
+                    elif state.overlay_on:
                         _name, edge_bgr, _bg = _EDGE_COLORS[state.color_idx]
                         ovl = state.warped_display.copy()
                         ovl[preview_entry.display_inv_gray == 0] = edge_bgr
@@ -1931,16 +2540,18 @@ def edit_edgemap(
                         right_panel = state.master_panel
                 else:
                     mid_panel   = state.edge_panel
-                    right_panel = state.overlay_panel if state.overlay_on else state.master_panel
+                    right_panel = state.master_panel
             else:
                 mid_panel   = state.edge_panel
-                right_panel = state.overlay_panel if state.overlay_on else state.master_panel
+                right_panel = state.overlay_panel if (state.overlay_on and state.overlay_panel is not None) else state.master_panel
 
             target_h           = max(ctrl_panel.shape[0], mid_panel.shape[0], right_panel.shape[0])
             state.main_panel_h = target_h
+            info_panel         = _draw_info_panel(state, target_h)
 
             main_row = np.hstack([
                 _pad_to_height(ctrl_panel,  target_h),
+                _pad_to_height(info_panel,  target_h),
                 _pad_to_height(mid_panel,   target_h),
                 _pad_to_height(right_panel, target_h),
             ])
@@ -1977,8 +2588,13 @@ def edit_edgemap(
                         state.merge_edge_panel = None
                         state.edges_dirty      = True
                 elif state.preview_take_idx is not None:
-                    state.preview_take_idx = None
-                    state.edges_dirty      = True
+                    if state.pre_seed_values is not None:
+                        for sl, v in zip(state.sliders, state.pre_seed_values):
+                            sl.value = v
+                        state.pre_seed_values = None
+                    state.preview_take_idx    = None
+                    state.preview_color_ver_id = None
+                    state.edges_dirty         = True
                 else:
                     state.done = True
 
@@ -1990,7 +2606,7 @@ def edit_edgemap(
                         state.merge_mode       = False
                         state.merge_edge_panel = None
                         state.edges_dirty      = True
-                    elif len(state.patches) >= 1:
+                    elif len(state.patches) >= 1 and state.has_take_zero:
                         state.merge_mode  = True
                         state.merge_dirty = True
 
@@ -2037,4 +2653,4 @@ def edit_edgemap(
         if t.is_new
     ]
 
-    return new_takes, _patches_to_session_data(state.patches), _super_areas_to_session_data(state.super_areas)
+    return new_takes, _patches_to_session_data(state.patches), _super_areas_to_session_data(state.super_areas), state.colorize_take_idx

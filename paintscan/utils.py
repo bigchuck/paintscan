@@ -339,6 +339,7 @@ class SessionData:
     takes:              list          # one dict per Take, keys: index + threshold names
     local_regions:      list = field(default_factory=list)   # patches (seed_norm, seal, thresholds, patch_id, super_area_id)
     super_areas:        list = field(default_factory=list)   # super-area records (super_area_id, thresholds, patch_ids)
+    color_versions:     list = field(default_factory=list)   # color version records (version_id, parent_take_idx, ...)
 
 
 def _thresholds_dict(
@@ -365,6 +366,7 @@ def save_session(session_path: Path, data: SessionData) -> None:
         "takes":              data.takes,
         "local_regions":      data.local_regions,
         "super_areas":        data.super_areas,
+        "color_versions":     data.color_versions,
     }
     session_path.parent.mkdir(parents=True, exist_ok=True)
     with open(session_path, "w", encoding="utf-8") as fh:
@@ -393,6 +395,7 @@ def load_session(session_path: Path) -> SessionData | None:
             takes              = d.get("takes", []),
             local_regions      = d.get("local_regions", []),
             super_areas        = d.get("super_areas", []),
+            color_versions     = d.get("color_versions", []),
         )
     except Exception:
         return None

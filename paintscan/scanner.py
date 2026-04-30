@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 import cv2
 import numpy as np
 
-from interact import edit_quad, edit_edgemap
+from interact import edit_quad, edit_edgemap, edit_colorize, _generate_color_thumbnail
 from utils import (
     draw_quad,
     load_image,
@@ -718,12 +719,11 @@ def process_image(
         patches_data:  list = []
         super_areas_data: list = []
         if cfg.edgemap:
-            edgemap_takes, patches_data, super_areas_data = edit_edgemap(
+            edgemap_takes, patches_data, super_areas_data, _clr_idx = edit_edgemap(
                 warped,
                 l_lo=cfg.canny_lo,   l_hi=cfg.canny_hi,
                 a_lo=cfg.lab_a_lo,   a_hi=cfg.lab_a_hi,
                 b_lo=cfg.lab_b_lo,   b_hi=cfg.lab_b_hi,
-                # No initial_takes_data — fresh session; Take 0 auto-created inside
             )
             # Write edge files only for user Takes (index >= 1)
             user_takes = [t for t in edgemap_takes if t["index"] > 0]
@@ -771,6 +771,11 @@ def process_image(
         save_session(sess_path, session)
         print(f"[INFO] Session saved: {sess_path.name}")
 
+        # If user hit COLORIZE during the edgemap session, re-enter via process_from_master
+        # so the full Lab↔colorize loop is available.
+        if _clr_idx is not None and cfg.edgemap:
+            process_from_master(out_path, out_dir, cfg)
+
         # --- Debug overlays ---
         if cfg.debug:
             debug_overlay = draw_quad(image_small, final_corners_small)
@@ -816,98 +821,225 @@ def process_image(
 # Re-entry from master
 # ---------------------------------------------------------------------------
 
-def process_from_master(master_path, cfg) -> None:
-    """Re-enter the edge-map session for an already-processed image.
- 
-    Loads the existing session (corners, thresholds, prior takes, patches),
-    re-opens the interactive editor with the filmstrip pre-populated, then
-    appends any new takes to the session JSON.
-    """
+def process_from_master(master_path, out_dir, cfg) -> "ProcessResult":
+    """Re-enter the Lab editor and (optionally) colorize session for an already-processed image."""
     from pathlib import Path
     from datetime import datetime as _dt
- 
+    from utils import SessionData, save_session
+    from interact import compute_lab_edges, _compute_composite_inv_gray, _restore_patches_from_session
+
     master_path = Path(master_path)
-    out_dir     = master_path.parent
+    out_dir     = Path(out_dir)
     stem        = master_path.stem.replace("_master", "")
     sess_path   = session_path_for(out_dir, stem)
- 
+
     if not sess_path.exists():
-        print(f"[ERROR] No session file found: {sess_path}")
-        return
- 
+        msg = f"No session file: {sess_path}"
+        print(f"[ERROR] {msg}")
+        return ProcessResult(source=master_path, output_master=None, confidence=None,
+                             method="from-master", accepted=False, used_interactive=True, message=msg)
+
     existing = load_session(sess_path)
     if existing is None:
-        print(f"[ERROR] Could not load session: {sess_path}")
-        return
- 
-    print(
-        f"[INFO] Session restored from {sess_path.name}  "
-        f"({len(existing.takes)} previous take(s))"
-    )
- 
+        msg = f"Could not load session: {sess_path}"
+        print(f"[ERROR] {msg}")
+        return ProcessResult(source=master_path, output_master=None, confidence=None,
+                             method="from-master", accepted=False, used_interactive=True, message=msg)
+
+    print(f"[INFO] Session restored: {sess_path.name}  ({len(existing.takes)} take(s))")
+
     warped = cv2.imread(str(master_path))
     if warped is None:
-        print(f"[ERROR] Could not read master: {master_path}")
-        return
- 
-    # Seed initial slider values from the last take, or from the session's
-    # initial_thresholds if no takes exist yet.
-    if existing.takes:
-        seed = existing.takes[-1]
-    else:
-        seed = existing.initial_thresholds
- 
-    new_takes, new_patches_data, new_super_areas_data = edit_edgemap(
-        warped,
-        l_lo=seed["l_lo"], l_hi=seed["l_hi"],
-        a_lo=seed["a_lo"], a_hi=seed["a_hi"],
-        b_lo=seed["b_lo"], b_hi=seed["b_hi"],
-        initial_patches_data    = existing.local_regions if existing else None,
-        initial_takes_data      = existing.takes         if existing else None,
-        initial_super_areas_data= existing.super_areas   if existing else None,
-    )
- 
-    # Write only genuinely new user takes (index >= 1, is_new=True inside interact)
-    user_new_takes = [t for t in new_takes if t["index"] > 0]
-    if user_new_takes:
-        new_records = _write_edge_takes(
-            user_new_takes, stem, out_dir, cfg.jpg_quality)
-    else:
-        new_records = []
-        print("[INFO] Edge map session closed — no new edge files written.")
- 
-    # Build new-take session records from all new_takes
-    # (edit_edgemap only returns is_new=True takes, so this captures any new
-    # Take 0 from a fresh session, though for process_from_master Take 0 is
-    # always already in existing.takes)
-    new_records_full: list[dict] = []
-    for t in new_takes:
-        if t["index"] > 0:
-            # These were written to disk; use the records returned by _write_edge_takes
+        msg = f"Cannot read master: {master_path}"
+        print(f"[ERROR] {msg}")
+        return ProcessResult(source=master_path, output_master=None, confidence=None,
+                             method="from-master", accepted=False, used_interactive=True, message=msg)
+
+    # color_versions lives in the session JSON; we keep it updated in memory across iterations
+    color_versions: list = list(getattr(existing, "color_versions", []) or [])
+    all_takes:      list = list(existing.takes)
+    next_color_ver: int  = (max(cv["version_id"] for cv in color_versions) + 1
+                            if color_versions else 1)
+    _last_colorize_take: Optional[int] = None   # pre-select on re-entry after colorize
+
+    while True:
+        # Seed sliders from the most recent take
+        seed = all_takes[-1] if all_takes else existing.initial_thresholds
+
+        # Build cv_by_take for filmstrip — restore thumbnails and load display images
+        import numpy as _np
+        cv_by_take: dict[int, list] = {}
+        for cv_rec in color_versions:
+            ti = cv_rec.get("parent_take_idx")
+            if ti is None:
+                continue
+            cv_rec = dict(cv_rec)
+            if isinstance(cv_rec.get("thumbnail"), list):
+                cv_rec["thumbnail"] = _np.array(cv_rec["thumbnail"], dtype=_np.uint8)
+            if "display_image" not in cv_rec:
+                vid      = cv_rec.get("version_id")
+                clr_path = out_dir / f"{stem}_color_v{vid}.jpg"
+                if clr_path.exists():
+                    img = cv2.imread(str(clr_path))
+                    if img is not None:
+                        from interact import _compute_panel_size
+                        dw2, dh2 = _compute_panel_size(img)
+                        cv_rec["display_image"] = cv2.resize(img, (dw2, dh2), interpolation=cv2.INTER_AREA)
+            cv_by_take.setdefault(ti, []).append(cv_rec)
+
+        print("[INFO] Opening Lab editor …")
+        new_takes, new_patches, new_super_areas, colorize_take_idx = edit_edgemap(
+            warped,
+            l_lo=seed["l_lo"], l_hi=seed["l_hi"],
+            a_lo=seed["a_lo"], a_hi=seed["a_hi"],
+            b_lo=seed["b_lo"], b_hi=seed["b_hi"],
+            base_image               = "master",
+            initial_patches_data     = existing.local_regions,
+            initial_takes_data       = all_takes if all_takes else None,
+            initial_super_areas_data = existing.super_areas,
+            initial_color_versions   = cv_by_take,
+            initial_preview_take_idx = _last_colorize_take,
+        )
+        _last_colorize_take = None
+
+        # Absorb new takes into all_takes
+        take_zero_new = [t for t in new_takes if t["index"] == 0]
+        user_new      = [t for t in new_takes if t["index"] > 0]
+        if user_new:
+            new_records = _write_edge_takes(user_new, stem, out_dir, cfg.jpg_quality)
+            all_takes   = all_takes + new_records
+        existing_indices = {t.get("index") for t in all_takes}
+        for t0 in take_zero_new:
+            if t0["index"] not in existing_indices:
+                all_takes.append({
+                    "index":       t0["index"],
+                    **_thresholds_dict(*t0["global_thresholds"]),
+                    "seeded_from": t0["seeded_from"],
+                    "base_image":  t0["base_image"],
+                    "local_region": None,
+                })
+        all_takes.sort(key=lambda t: t.get("index", 0))   # always keep T0 first
+
+        # Update patches/super-areas if changed
+        if new_patches:     existing.local_regions = new_patches
+        if new_super_areas: existing.super_areas   = new_super_areas
+
+        updated = SessionData(
+            schema_version     = existing.schema_version,
+            timestamp          = existing.timestamp,
+            source_path        = existing.source_path,
+            output_stem        = existing.output_stem,
+            corners_full       = existing.corners_full,
+            initial_thresholds = existing.initial_thresholds,
+            takes              = all_takes,
+            local_regions      = existing.local_regions,
+            super_areas        = existing.super_areas,
+            color_versions     = color_versions,
+        )
+        save_session(sess_path, updated)
+        print(f"[INFO] Session saved: {sess_path.name}  ({len(all_takes)} take(s))")
+
+        if colorize_take_idx is None:
+            break   # user pressed Done/Esc — finished
+
+        # ── Colorize session ─────────────────────────────────────────────────
+        take_rec = next((t for t in all_takes if t.get("index") == colorize_take_idx), None)
+        print(f"[INFO] Opening colorize editor for T{colorize_take_idx} …")
+
+        # Build Take's global thresholds
+        _thresh = (
+            int(take_rec.get("l_lo", 50)), int(take_rec.get("l_hi", 150)),
+            int(take_rec.get("a_lo", 30)), int(take_rec.get("a_hi",  90)),
+            int(take_rec.get("b_lo", 30)), int(take_rec.get("b_hi",  90)),
+        ) if take_rec else (50, 150, 30, 90, 30, 90)
+
+        # Restore Lab patches at full resolution for region resolution
+        from interact import _Slider, _SLIDER_DEFS
+        proxy_sliders = [
+            _Slider(d[0], d[1], d[2], max(d[1], min(d[2], _thresh[i])), d[4])
+            for i, d in enumerate(_SLIDER_DEFS)
+        ]
+        restored_patches, _ = _restore_patches_from_session(
+            warped, existing.local_regions or [], proxy_sliders)
+
+        # Compute edge maps: full-res for final write, display-res for flood fill
+        inv_gray_full = compute_lab_edges(warped, *_thresh)
+        # Display-res edge map — computed directly at display size for accurate flood fill
+        from interact import _compute_panel_size
+        _dw, _dh   = _compute_panel_size(warped)
+        _warped_dsp = cv2.resize(warped, (_dw, _dh), interpolation=cv2.INTER_AREA)
+        inv_gray_disp = compute_lab_edges(_warped_dsp, *_thresh)
+
+        # Starting image: selected color version or master
+        selected_cv = cv_by_take.get(colorize_take_idx, [])
+        prior_committed: list | None = None
+        base_display: np.ndarray | None = None
+        base_full:    np.ndarray | None = None
+
+        # Check if a color version was selected in the filmstrip (passed back via cv_by_take)
+        # We don't track which was selected here — scanner always starts from latest unless
+        # the user specifically loaded a prior version.  That selection happens in the editor.
+        # For now: colorize always starts from master on first entry for this Take,
+        # or from the latest color version if one exists for this Take.
+        if selected_cv:
+            latest_cv  = selected_cv[-1]
+            vid        = latest_cv.get("version_id")
+            clr_path_b = out_dir / f"{stem}_color_v{vid}.jpg"
+            if clr_path_b.exists():
+                base_full    = cv2.imread(str(clr_path_b))
+                base_display = latest_cv.get("display_image")
+                prior_committed = latest_cv.get("committed_data")
+                print(f"[INFO] Starting from color_v{vid}")
+
+        colorized_full, committed_data = edit_colorize(
+            warped_full        = warped,
+            take_inv_gray_disp = inv_gray_disp,
+            take_inv_gray_full = inv_gray_full,
+            lab_patches        = restored_patches,
+            super_areas        = existing.super_areas or [],
+            base_display       = base_display,
+            base_full          = base_full,
+            initial_committed  = prior_committed,
+        )
+
+        if colorized_full is None:
+            print("[INFO] Colorize cancelled — returning to Lab editor.")
+            _last_colorize_take = colorize_take_idx
             continue
-        # Only reaches here for a Take-0 edge case that shouldn't arise in re-entry
-        new_records_full.append({
-            "index":       t["index"],
-            **_thresholds_dict(*t["global_thresholds"]),
-            "seeded_from": t["seeded_from"],
-            "base_image":  t["base_image"],
-            "local_region": None,
-        })
- 
-    prior_takes   = existing.takes if existing else []
-    all_takes     = prior_takes + new_records   # new_records from _write_edge_takes
- 
-    from utils import SessionData, save_session
-    updated_session = SessionData(
-        schema_version    = existing.schema_version,
-        timestamp         = existing.timestamp,
-        source_path       = existing.source_path,
-        output_stem       = existing.output_stem,
-        corners_full      = existing.corners_full,
-        initial_thresholds= existing.initial_thresholds,
-        takes             = all_takes,
-        local_regions     = new_patches_data    if new_patches_data    else existing.local_regions,
-        super_areas       = new_super_areas_data if new_super_areas_data else existing.super_areas,
+
+        # Write color version file
+        clr_out = out_dir / f"{stem}_color_v{next_color_ver}.jpg"
+        save_jpg(clr_out, colorized_full, quality=cfg.jpg_quality)
+        print(f"[INFO] Saved color_v{next_color_ver}: {clr_out.name}")
+
+        # Build display thumbnail and small version for filmstrip
+        thumb = _generate_color_thumbnail(
+            cv2.resize(colorized_full,
+                       (colorized_full.shape[1]//4, colorized_full.shape[0]//4),
+                       interpolation=cv2.INTER_AREA))
+
+        cv_entry = {
+            "version_id":       next_color_ver,
+            "parent_take_idx":  colorize_take_idx,
+            "timestamp":        _dt.now().isoformat(timespec="seconds"),
+            "base_image":       f"color_v{next_color_ver-1}" if selected_cv else "master",
+            "committed_data":   committed_data,
+            "thumbnail":        thumb.tolist(),
+        }
+        color_versions.append(cv_entry)
+        _last_colorize_take = colorize_take_idx
+        next_color_ver += 1
+
+        updated.color_versions = color_versions
+        save_session(sess_path, updated)
+        print(f"[INFO] Session updated with color_v{next_color_ver-1}")
+
+    return ProcessResult(
+        source           = master_path,
+        output_master    = master_path,
+        confidence       = None,
+        method           = "from-master",
+        accepted         = True,
+        used_interactive = True,
+        session_path     = sess_path,
     )
-    save_session(updated_session, sess_path)
-    print(f"[INFO] Session updated: {sess_path.name}  ({len(all_takes)} total take(s))")
