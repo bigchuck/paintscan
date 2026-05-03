@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import cv2
@@ -139,8 +140,6 @@ _OC_BTN_CY  = 678
 _BTN_OVL_CX = 75
 _BTN_CLR_CX = 220
 
-_TOTAL_H = 788   # ctrl panel — 788+216=1004px, fits 1080p
-
 # Amber accent for local mode (BGR)
 _AMBER: tuple = (0, 165, 255)
 
@@ -160,6 +159,14 @@ _SEAL_DEFAULT  = 4    # bridges gaps up to ~8 px wide; raise for loose edge maps
 # Merge button row — sits below the SEAL row
 _MERGE_BTN_CY  = 750
 _MERGE_ADJ_PX  = 15   # dilation px for adjacency check — generous to handle thick Canny edges
+
+# Print Preview button — sits below the merge row, global mode only
+_BTN_PRINT_W   = 200
+_BTN_PRINT_H   = 26
+_BTN_PRINT_CY  = 784
+_BTN_PRINT_CX  = _CTRL_W // 2   # 150
+
+_TOTAL_H = 820   # ctrl panel height (extended to fit PRINT PREVIEW button)
 
 # --- Filmstrip: two rows (Takes top, Color versions bottom) -----------------
 _FILM_ROW_H   = 108   # height of each row
@@ -379,11 +386,12 @@ class _EdgemapState:
     merge_edge_panel:   Optional[np.ndarray] = None
 
     # Phase 3 — colorize / filmstrip
-    colorize_take_idx:    Optional[int] = None   # set when user hits COLORIZE
-    preview_color_ver_id: Optional[int] = None   # which color swatch is selected
-    pre_seed_values:      Optional[list] = None  # slider values before Take was selected
-    has_take_zero:        bool = False            # Take-0 exists (user has pressed TAKE once)
-    base_image:           str  = "master"        # base image label for this session
+    colorize_take_idx:      Optional[int] = None   # set when user hits COLORIZE
+    print_preview_take_idx: Optional[int] = None   # set when user hits PRINT PREVIEW
+    preview_color_ver_id:   Optional[int] = None   # which color swatch is selected
+    pre_seed_values:        Optional[list] = None  # slider values before Take was selected
+    has_take_zero:          bool = False            # Take-0 exists (user has pressed TAKE once)
+    base_image:             str  = "master"        # base image label for this session
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +413,7 @@ def _draw_ctrl_panel(
     merge_active_sa_id: int | None = None,
     super_area_count: int = 0,
     has_take_zero: bool = False,
+    print_preview_enabled: bool = False,
 ) -> np.ndarray:
     panel = np.full((_TOTAL_H, _CTRL_W, 3), 28, dtype=np.uint8)
 
@@ -474,7 +483,7 @@ def _draw_ctrl_panel(
     cv2.putText(panel, cnt_text, (_BTN_TAKE_CX - tw // 2, _TAKE_COUNT_Y),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.50, cnt_col, 1, cv2.LINE_AA)
 
-    # Patches count (below taken counter)
+    # Patches count
     if patch_count > 0:
         ptch_text  = f"patches: {patch_count}"
         ptch_color = _AMBER
@@ -496,12 +505,12 @@ def _draw_ctrl_panel(
     cv2.putText(panel, sa_text, (_BTN_TAKE_CX - tw // 2, _TAKE_COUNT_Y + 34),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.40, sa_color, 1, cv2.LINE_AA)
 
-    # Second row: OVL / EXIT LOCAL / (merge mode: blank)  +  CLR
+    # OVL / EXIT LOCAL / CLR row
     if local_mode:
         _draw_button(panel, "EXIT LOCAL", _BTN_OVL_CX, _OC_BTN_CY,
                      _AMBER, _OC_BTN_W, _OC_BTN_H)
     elif merge_mode:
-        pass   # no OVL button in merge mode — right panel is always master
+        pass   # no OVL button in merge mode
     else:
         ovl_label = "OVL: ON " if overlay_on else "OVL: OFF"
         ovl_color = (35, 130, 35) if overlay_on else (60, 60, 60)
@@ -512,7 +521,7 @@ def _draw_ctrl_panel(
     _draw_button(panel, clr_label, _BTN_CLR_CX, _OC_BTN_CY,
                  (55, 55, 90), _OC_BTN_W, _OC_BTN_H)
 
-    # Bottom row: SEAL (new local) / CLR THIS PATCH (edit mode) / CLR PTCH or hint (global)
+    # SEAL row: local controls / CLR THIS PATCH / CLR PTCH / hints
     if local_mode:
         if local_patch_idx is not None:
             _draw_button(panel, "CLR THIS PATCH", _CTRL_W // 2, _SEAL_ROW_Y,
@@ -539,7 +548,7 @@ def _draw_ctrl_panel(
         hint = "Click edge panel to select area"
         (tw, _), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
         cv2.putText(panel, hint, (_CTRL_W // 2 - tw // 2, _SEAL_ROW_Y + 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (80, 80, 80), 1, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (60, 60, 60), 1, cv2.LINE_AA)
 
     # MERGE / EXIT MERGE row
     if merge_mode:
@@ -554,6 +563,12 @@ def _draw_ctrl_panel(
         (tw, _), _ = cv2.getTextSize(hint2, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)
         cv2.putText(panel, hint2, (_CTRL_W // 2 - tw // 2, _MERGE_BTN_CY + 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.35, col2, 1, cv2.LINE_AA)
+
+    # PRINT PREVIEW button — global mode only; dims when no Take is selected
+    if not local_mode and not merge_mode:
+        pp_col = (85, 55, 125) if print_preview_enabled else (42, 38, 50)
+        _draw_button(panel, "PRINT PREVIEW", _BTN_PRINT_CX, _BTN_PRINT_CY,
+                     pp_col, _BTN_PRINT_W, _BTN_PRINT_H)
 
     return panel
 
@@ -596,7 +611,6 @@ def _compute_composite_inv_gray(
     composite = compute_lab_edges(warped_display, *g_vals)
     sa_list   = super_areas or []
     for patch in patches:
-        # Resolve effective thresholds: SA overrides patch's own thresholds
         sa_id  = patch.get("super_area_id")
         if sa_id is not None:
             sa = next((s for s in sa_list if s["super_area_id"] == sa_id), None)
@@ -681,21 +695,11 @@ def _get_screen_size() -> tuple[int, int]:
 
 
 def _compute_panel_size(image: np.ndarray) -> tuple[int, int]:
-    """Return the (width, height) each display panel image should be rendered at.
-
-    Fills the available screen area optimally:
-      - Horizontal: (screen_w - control_strip - borders) split equally between
-        the two side-by-side display panels.
-      - Vertical: screen_h minus filmstrip, borders, and OS taskbar allowance.
-      - Both constraints applied simultaneously so the image aspect ratio is
-        preserved exactly.
-    """
+    """Return the (width, height) each display panel image should be rendered at."""
     ih, iw     = image.shape[:2]
     sw, sh     = _get_screen_size()
-    os_chrome  = 72   # taskbar + window title bar allowance (pixels)
+    os_chrome  = 72
 
-    # Each panel may use at most half the horizontal space left after the
-    # control strip and inter-panel borders.
     avail_w = (sw - _CTRL_W - _CTRL2_W - _BORDER * 8) // 2
     avail_h = sh - _FILM_H - _BORDER * 4 - os_chrome
 
@@ -728,23 +732,15 @@ def _pad_to_height(img: np.ndarray, h: int) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def _generate_thumbnail(inv_gray: np.ndarray) -> np.ndarray:
-    """Scale *inv_gray* to _FILM_THUMB_H, letterbox to _FILM_THUMB_W, return BGR.
-
-    inv_gray convention: 255 = background (white), 0 = edge (black).
-    The thumbnail preserves this so edges appear dark on a light ground,
-    readable at small sizes without needing the colour-palette setting.
-    """
+    """Scale *inv_gray* to _FILM_THUMB_H, letterbox to _FILM_THUMB_W, return BGR."""
     h, w   = inv_gray.shape
     scale  = _FILM_THUMB_H / max(1, h)
     new_w  = max(1, int(round(w * scale)))
     small  = cv2.resize(inv_gray, (new_w, _FILM_THUMB_H), interpolation=cv2.INTER_AREA)
-
-    # Letterbox into a fixed-width canvas (light-grey background)
     canvas = np.full((_FILM_THUMB_H, _FILM_THUMB_W), 200, dtype=np.uint8)
     x0     = max(0, (_FILM_THUMB_W - new_w) // 2)
     x1     = min(_FILM_THUMB_W, x0 + new_w)
     canvas[:, x0:x1] = small[:, : x1 - x0]
-
     return cv2.cvtColor(canvas, cv2.COLOR_GRAY2BGR)
 
 
@@ -771,10 +767,7 @@ def _flood_fill_region(
     seed_y: int,
     seal_px: int = 0,
 ) -> np.ndarray:
-    """
-    Flood-fill from (seed_x, seed_y) through connected white (non-edge)
-    pixels in *inv_gray* (255=background, 0=edge).
-    """
+    """Flood-fill from (seed_x, seed_y) through connected white pixels in inv_gray."""
     h, w = inv_gray.shape
 
     if seal_px > 0:
@@ -828,12 +821,13 @@ def _make_local_edge_panel(
     super_areas: list | None = None,
 ) -> np.ndarray:
     """Composite edge panel for local mode."""
-    outside_inv = _compute_composite_inv_gray(warped_display, global_sliders, patches or [], super_areas)
+    composite_base = _compute_composite_inv_gray(
+        warped_display, global_sliders, patches or [], super_areas)
 
     l_vals    = [sl.value for sl in local_sliders]
     local_inv = compute_lab_edges(warped_display, *l_vals)
 
-    merged = outside_inv.copy()
+    merged = composite_base.copy()
     merged[local_mask > 0] = local_inv[local_mask > 0]
 
     _name, edge_bgr, bg_bgr = _EDGE_COLORS[color_idx]
@@ -862,8 +856,6 @@ def _make_zoom_panel(
     warped_display: np.ndarray,
     local_bbox: tuple[int, int, int, int],
 ) -> np.ndarray:
-    """Crop *warped_display* to *local_bbox* (+ 15 % padding), scaled to the
-    same height as the main display panels so the layout stays stable."""
     x0, y0, x1, y1 = local_bbox
     h, w = warped_display.shape[:2]
     pad_x = max(10, int((x1 - x0) * 0.15))
@@ -871,7 +863,6 @@ def _make_zoom_panel(
     cx0 = max(0, x0 - pad_x);  cy0 = max(0, y0 - pad_y)
     cx1 = min(w, x1 + pad_x);  cy1 = min(h, y1 + pad_y)
     crop   = warped_display[cy0:cy1, cx0:cx1].copy()
-    # Scale so the crop fills the panel height; width follows aspect ratio
     zoomed = _scale_to_height(crop, h)
     cv2.rectangle(zoomed, (0, 0), (64, 22), _AMBER, -1)
     cv2.putText(zoomed, "ZOOM", (4, 16),
@@ -898,7 +889,7 @@ def _make_local_sliders_from_thresholds(thresholds: tuple) -> list:
 
 def _enter_local_mode(state: _EdgemapState, disp_x: int, disp_y: int) -> None:
     if not state.has_take_zero:
-        return   # locked until Take-0 established
+        return
     for i in range(len(state.patches) - 1, -1, -1):
         patch = state.patches[i]
         if patch["mask"][disp_y, disp_x] > 0:
@@ -949,14 +940,14 @@ def _rerun_flood_fill(state: _EdgemapState) -> None:
 
 
 def _exit_local_mode(state: _EdgemapState) -> None:
-    state.local_mode      = False
-    state.local_mask      = None
-    state.local_bbox      = None
-    state.local_seed_disp = None
-    state.local_patch_idx = None
-    state.local_sliders   = []
-    state.local_init_vals = []
-    state.local_drag_idx  = None
+    state.local_mode       = False
+    state.local_mask       = None
+    state.local_bbox       = None
+    state.local_seed_disp  = None
+    state.local_patch_idx  = None
+    state.local_sliders    = []
+    state.local_init_vals  = []
+    state.local_drag_idx   = None
     state.local_edge_panel = None
     state.local_zoom_panel = None
 
@@ -977,7 +968,6 @@ def _commit_local_patch(state: _EdgemapState) -> None:
 
     h, w = state.warped_display.shape[:2]
     if state.local_patch_idx is not None:
-        # Editing existing patch — preserve its identity fields
         orig = state.patches[state.local_patch_idx]
         new_patch: dict = {
             "patch_id":      orig["patch_id"],
@@ -990,7 +980,6 @@ def _commit_local_patch(state: _EdgemapState) -> None:
         }
         state.patches[state.local_patch_idx] = new_patch
     else:
-        # New patch
         new_patch = {
             "patch_id":      _alloc_patch_id(state),
             "super_area_id": None,
@@ -1027,11 +1016,7 @@ def _restore_patches_from_session(
     patches_data: list,
     global_sliders: list,
 ) -> tuple[list, int]:
-    """Reconstruct patch masks from saved session data.
-
-    Returns (patches, next_patch_id) where next_patch_id is one beyond the
-    highest patch_id seen, so new patches in this session never collide.
-    """
+    """Reconstruct patch masks from saved session data."""
     if not patches_data:
         return [], 0
 
@@ -1155,12 +1140,10 @@ def _unmerge_patch(state: _EdgemapState, patch_id: int) -> None:
     if sa and patch_id in sa["patch_ids"]:
         sa["patch_ids"].remove(patch_id)
         if len(sa["patch_ids"]) <= 1:
-            # Dissolve — clear super_area_id on the last remaining member too
             for p in state.patches:
                 if p.get("super_area_id") == sa_id:
                     p["super_area_id"] = None
             state.super_areas = [s for s in state.super_areas if s["super_area_id"] != sa_id]
-            # If we were editing this SA, exit SA edit
             if state.merge_active_sa_id == sa_id:
                 state.merge_active_sa_id = None
                 state.merge_sliders      = []
@@ -1173,7 +1156,7 @@ def _unmerge_patch(state: _EdgemapState, patch_id: int) -> None:
 def _unpatch_by_id(state: _EdgemapState, patch_id: int) -> None:
     """Delete a patch entirely.  Unmerges from SA first if necessary."""
     _unmerge_patch(state, patch_id)
-    state.patches    = [p for p in state.patches if p["patch_id"] != patch_id]
+    state.patches     = [p for p in state.patches if p["patch_id"] != patch_id]
     state.edges_dirty = True
     state.merge_dirty = True
 
@@ -1187,17 +1170,14 @@ def _do_merge_lclick(state: _EdgemapState, disp_x: int, disp_y: int) -> None:
 
 
 def _do_merge_lclick_inner(state: _EdgemapState, disp_x: int, disp_y: int) -> None:
-    # Click on an existing patch → enter SA edit (if it has one) or ignore
     for patch in reversed(state.patches):
         if patch["mask"][disp_y, disp_x] > 0:
             sa_id = patch.get("super_area_id")
             if sa_id is not None:
                 _enter_sa_edit(state, sa_id)
                 state.merge_dirty = True
-            # standalone patch: left-click does nothing; right-click unpatches
             return
 
-    # Empty area: flood-fill, check adjacency, join
     if state.inv_gray_cache is None:
         return
     mask = _flood_fill_region(state.inv_gray_cache, disp_x, disp_y,
@@ -1206,7 +1186,6 @@ def _do_merge_lclick_inner(state: _EdgemapState, disp_x: int, disp_y: int) -> No
     if bbox is None:
         return
 
-    # Find first adjacent existing patch
     adjacent = None
     for patch in reversed(state.patches):
         if _masks_adjacent(mask, patch["mask"]):
@@ -1215,15 +1194,15 @@ def _do_merge_lclick_inner(state: _EdgemapState, disp_x: int, disp_y: int) -> No
 
     if adjacent is None:
         print("[MERGE] No adjacent patch found — click closer to an existing patch")
-        return   # not touching any patch — rejected
+        return
 
     new_pid = _alloc_patch_id(state)
     h, w    = state.warped_display.shape[:2]
     new_patch: dict = {
         "patch_id":      new_pid,
-        "super_area_id": None,           # set below
+        "super_area_id": None,
         "mask":          mask,
-        "thresholds":    tuple(sl.value for sl in state.sliders),  # own values at join time
+        "thresholds":    tuple(sl.value for sl in state.sliders),
         "bbox":          bbox,
         "seed_norm":     (disp_x / max(1, w), disp_y / max(1, h)),
         "seal":          state.local_seal,
@@ -1231,20 +1210,18 @@ def _do_merge_lclick_inner(state: _EdgemapState, disp_x: int, disp_y: int) -> No
 
     adj_sa_id = adjacent.get("super_area_id")
     if adj_sa_id is None:
-        # Adjacent patch is standalone → create a new super-area wrapping both
         new_sa_id = _alloc_super_area_id(state)
         adjacent["super_area_id"] = new_sa_id
         new_patch["super_area_id"] = new_sa_id
         sa = {
             "super_area_id": new_sa_id,
-            "thresholds":    adjacent["thresholds"],   # seed from adjacent patch's own thresholds
+            "thresholds":    adjacent["thresholds"],
             "patch_ids":     [adjacent["patch_id"], new_pid],
         }
         state.super_areas.append(sa)
         state.patches.append(new_patch)
         _enter_sa_edit(state, new_sa_id)
     else:
-        # Adjacent patch is in an existing SA → join it
         sa = _get_sa(state, adj_sa_id)
         new_patch["super_area_id"] = adj_sa_id
         sa["patch_ids"].append(new_pid)
@@ -1290,14 +1267,13 @@ def _make_merge_edge_panel(
         dilated = cv2.dilate(patch["mask"], kern, iterations=2)
         ring    = (dilated > 0) & (patch["mask"] == 0)
         if sa_id is None:
-            ring_color = _AMBER                   # standalone patch — amber
+            ring_color = _AMBER
         elif sa_id == active_sa_id:
-            ring_color = (80, 255, 80)            # active SA — bright green
+            ring_color = (80, 255, 80)
         else:
-            ring_color = _MERGE_GREEN             # other SA — muted green
+            ring_color = _MERGE_GREEN
         out[ring] = ring_color
 
-    # Banner
     cv2.rectangle(out, (0, 0), (out.shape[1], 28), (0, 140, 40), -1)
     msg = "MERGE  \u2014  L-click=join/edit SA  R-click=unmerge/unpatch  Esc=exit"
     cv2.putText(out, msg, (8, 19), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
@@ -1306,7 +1282,6 @@ def _make_merge_edge_panel(
 
 
 def _super_areas_to_session_data(super_areas: list) -> list:
-    """Serialise super_areas to a JSON-safe list (no numpy arrays)."""
     return [
         {
             "super_area_id": sa["super_area_id"],
@@ -1318,7 +1293,6 @@ def _super_areas_to_session_data(super_areas: list) -> list:
 
 
 def _restore_super_areas_from_session(super_areas_data: list) -> list:
-    """Reconstruct super_areas list from session JSON data."""
     result = []
     for sd in super_areas_data:
         try:
@@ -1335,7 +1309,6 @@ def _restore_super_areas_from_session(super_areas_data: list) -> list:
 # ---------------------------------------------------------------------------
 # Filmstrip — rendering and interaction
 # ---------------------------------------------------------------------------
-
 
 def _draw_info_panel(state: "_EdgemapState", panel_h: int) -> np.ndarray:
     """Secondary column: Take details, Lab bars, color swatches."""
@@ -1386,7 +1359,6 @@ def _draw_info_panel(state: "_EdgemapState", panel_h: int) -> np.ndarray:
     lbl(f"super-areas: {len(state.super_areas)}", y+26, col=_MERGE_GREEN if state.super_areas else (60,60,60))
     y += 36
 
-    # Color versions for selected Take
     if entry is not None and entry.color_versions:
         hline(y); y += 4
         cv2.rectangle(P,(0,y),(W,y+20),(60,30,70),-1)
@@ -1487,7 +1459,8 @@ def _make_filmstrip_panel(state: "_EdgemapState", total_w: int) -> np.ndarray:
             thumb = cv_rec.get("thumbnail")
             if thumb is not None:
                 try:
-                    panel[ty1:ty1+_FILM_THUMB_H, tx2:tx2+_FILM_THUMB_W] =                         thumb[:_FILM_THUMB_H, :_FILM_THUMB_W]
+                    panel[ty1:ty1+_FILM_THUMB_H, tx2:tx2+_FILM_THUMB_W] = \
+                        thumb[:_FILM_THUMB_H, :_FILM_THUMB_W]
                 except Exception:
                     pass
             (lw,_),_ = cv2.getTextSize(f"C{vid}", cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
@@ -1520,52 +1493,53 @@ def _seed_from_take(state: "_EdgemapState", take_idx: int) -> None:
 
 def _handle_filmstrip_click(state: "_EdgemapState", x: int, raw_y: int) -> None:
     """raw_y is relative to filmstrip top."""
-    if not state.takes:
-        return
-    in_top = raw_y < _FILM_ROW_H
-    fy_top = raw_y
     fy_bot = raw_y - _FILM_ROW_H
 
-    if in_top:
+    # Top row: Take thumbnails + LIVE/SEED buttons
+    if raw_y < _FILM_ROW_H:
+        btn_rx = state.window_w - _FILM_SEED_R - _FILM_BTN_W//2 - 12 if state.window_w > 0 else 9999
+
+        # LIVE button
         if state.window_w > 0:
-            # LIVE button
             live_cx = state.window_w - _FILM_LIVE_R
-            if _hit_button(x, fy_top, live_cx, _FILM_BTN_CY, _FILM_BTN_W, _FILM_BTN_H):
+            if _hit_button(x, raw_y, live_cx, _FILM_BTN_CY, _FILM_BTN_W, _FILM_BTN_H):
                 if state.pre_seed_values is not None:
                     for sl, v in zip(state.sliders, state.pre_seed_values):
                         sl.value = v
                     state.pre_seed_values = None
-                state.preview_take_idx    = None
+                state.preview_take_idx     = None
                 state.preview_color_ver_id = None
-                state.edges_dirty         = True
+                state.edges_dirty          = True
                 return
-            # SEED: explicit "keep these values and deselect"
+
+            # SEED button (only when a Take is previewed)
             if state.preview_take_idx is not None:
                 seed_cx = state.window_w - _FILM_SEED_R
-                if _hit_button(x, fy_top, seed_cx, _FILM_BTN_CY, _FILM_BTN_W, _FILM_BTN_H):
-                    state.pre_seed_values  = None   # commit — no revert
-                    state.preview_take_idx = None
-                    state.edges_dirty      = True
+                if _hit_button(x, raw_y, seed_cx, _FILM_BTN_CY, _FILM_BTN_W, _FILM_BTN_H):
+                    _seed_from_take(state, state.preview_take_idx)
                     return
 
+        # Take thumbnails
         if x >= _FILM_START_X:
             slot = (x - _FILM_START_X) // _FILM_SLOT_W
             if 0 <= slot < len(state.takes):
                 entry = state.takes[slot]
+                tx = _FILM_START_X + slot*_FILM_SLOT_W + (_FILM_SLOT_W - _FILM_THUMB_W)//2
+                if tx + _FILM_THUMB_W > btn_rx:
+                    return   # truncated slot
                 if state.preview_take_idx == entry.index:
-                    # Deselect — restore sliders
+                    # Deselect — restore pre-seed values
                     if state.pre_seed_values is not None:
                         for sl, v in zip(state.sliders, state.pre_seed_values):
                             sl.value = v
                         state.pre_seed_values = None
-                    state.preview_take_idx    = None
+                    state.preview_take_idx     = None
                     state.preview_color_ver_id = None
-                    state.edges_dirty         = True
+                    state.edges_dirty          = True
                 else:
-                    # Select — store current values, seed sliders to this Take
-                    if state.preview_take_idx is None:
-                        state.pre_seed_values = [sl.value for sl in state.sliders]
-                    state.preview_take_idx    = entry.index
+                    # Select this Take
+                    state.pre_seed_values      = [sl.value for sl in state.sliders]
+                    state.preview_take_idx     = entry.index
                     state.preview_color_ver_id = None
                     _seed_from_take(state, entry.index)
         return
@@ -1599,26 +1573,23 @@ def _handle_filmstrip_click(state: "_EdgemapState", x: int, raw_y: int) -> None:
 def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
     state: _EdgemapState = param
     ep_w = state.warped_display.shape[1] + 2 * _BORDER
-    # Edge panel starts after BOTH control columns
     _EP_X  = _CTRL_W + _CTRL2_W
     on_edge_panel = (_EP_X <= x < _EP_X + ep_w)
 
     # ---- RIGHT-CLICK -------------------------------------------------------
     if event == cv2.EVENT_RBUTTONDOWN:
         if state.main_panel_h > 0 and y >= state.main_panel_h:
-            return   # ignore in filmstrip
+            return
         if on_edge_panel:
             dh, dw = state.warped_display.shape[:2]
             disp_x = max(0, min(x - _EP_X - _BORDER, dw - 1))
             disp_y = max(0, min(y - _BORDER, dh - 1))
             if state.local_mode:
-                # Cancel local selection without committing
                 _exit_local_mode(state)
                 state.edges_dirty = True
             elif state.merge_mode:
                 _do_merge_rclick(state, disp_x, disp_y)
             else:
-                # Normal mode: right-click on patch → unpatch
                 for patch in reversed(state.patches):
                     if patch["mask"][disp_y, disp_x] > 0:
                         _unpatch_by_id(state, patch["patch_id"])
@@ -1637,7 +1608,6 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
         if x < _CTRL_W:
             # ---- Control panel ---------------------------------------------
             if state.merge_mode:
-                # SA slider drag
                 if state.merge_active_sa_id is not None:
                     for i, sl in enumerate(state.merge_sliders):
                         ty = _track_y(i)
@@ -1655,16 +1625,15 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
                 elif _hit_button(x, y, _BTN_DONE_CX, _BTN_CY):
                     state.done = True
                 elif _hit_button(x, y, _BTN_CLR_CX, _OC_BTN_CY, _OC_BTN_W, _OC_BTN_H):
-                    state.color_idx  = (state.color_idx + 1) % len(_EDGE_COLORS)
+                    state.color_idx   = (state.color_idx + 1) % len(_EDGE_COLORS)
                     state.merge_dirty = True
                 elif _hit_button(x, y, _CTRL_W // 2, _MERGE_BTN_CY, 160, _BTN_H):
-                    # EXIT MERGE
                     if state.merge_active_sa_id is not None:
                         _exit_sa_edit(state)
-                    state.merge_mode  = False
-                    state.merge_dirty = False
+                    state.merge_mode       = False
+                    state.merge_dirty      = False
                     state.merge_edge_panel = None
-                    state.edges_dirty = True
+                    state.edges_dirty      = True
 
             elif state.local_mode:
                 for i, sl in enumerate(state.local_sliders):
@@ -1735,7 +1704,12 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
                       and len(state.patches) >= 1):
                     state.merge_mode  = True
                     state.merge_dirty = True
-                    state.edges_dirty = True   # ensure inv_gray_cache is fresh for flood fill
+                    state.edges_dirty = True
+                elif _hit_button(x, y, _BTN_PRINT_CX, _BTN_PRINT_CY,
+                                 _BTN_PRINT_W, _BTN_PRINT_H):
+                    if state.preview_take_idx is not None:
+                        state.print_preview_take_idx = state.preview_take_idx
+                        state.done = True
 
         elif on_edge_panel:
             # ---- Edge panel click ------------------------------------------
@@ -1750,19 +1724,19 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
                     _commit_local_patch(state)
                     _exit_local_mode(state)
                     state.edges_dirty = True
+                else:
+                    state.local_dirty = True
             else:
                 if state.preview_take_idx is None:
                     _enter_local_mode(state, disp_x, disp_y)
                 else:
-                    # Deselect Take — restore sliders to pre-selection values
                     if state.pre_seed_values is not None:
                         for sl, v in zip(state.sliders, state.pre_seed_values):
                             sl.value = v
                         state.pre_seed_values = None
-                    state.preview_take_idx    = None
+                    state.preview_take_idx     = None
                     state.preview_color_ver_id = None
-                    state.edges_dirty         = True
-                    # Do NOT enter local mode on this same click
+                    state.edges_dirty          = True
 
     # ---- MOUSE MOVE --------------------------------------------------------
     elif event == cv2.EVENT_MOUSEMOVE:
@@ -1798,49 +1772,40 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
 # ---------------------------------------------------------------------------
 
 def _do_take(state: _EdgemapState) -> None:
-    """Compute a full-resolution edge map and append a _TakeEntry to state.takes.
-
-    The entry captures global thresholds, any active local-region info,
-    a seeded_from reference (which prior Take's values were loaded), and a
-    small thumbnail for the filmstrip.
-
-    After taking, preview_take_idx is cleared so the UI returns to live view.
-    """
-    global_vals    = tuple(sl.value for sl in state.sliders)
+    """Compute a full-resolution edge map and append a _TakeEntry to state.takes."""
     h_full, w_full = state.warped_full.shape[:2]
-    h_disp, w_disp = state.warped_display.shape[:2]
+    global_vals    = tuple(sl.value for sl in state.sliders)
 
-    # Base composite: global thresholds + all committed patches + super-areas
     composite_base = _compute_composite_inv_gray(
         state.warped_display, state.sliders, state.patches, state.super_areas)
 
-    if state.local_mode and state.local_mask is not None:
-        local_vals = tuple(sl.value for sl in state.local_sliders)
-        local_inv  = compute_lab_edges(state.warped_display, *local_vals)
-        merged     = composite_base.copy()
-        merged[state.local_mask > 0] = np.minimum(
-            merged[state.local_mask > 0],
-            local_inv[state.local_mask > 0],
-        )
+    if state.local_mode and state.local_mask is not None and state.local_sliders:
+        l_vals    = [sl.value for sl in state.local_sliders]
+        local_inv = compute_lab_edges(state.warped_display, *l_vals)
+        merged    = composite_base.copy()
+        merged[state.local_mask > 0] = local_inv[state.local_mask > 0]
         display_inv_gray = merged
-        full_edges       = cv2.resize(merged, (w_full, h_full),
-                                      interpolation=cv2.INTER_NEAREST)
-        rx = w_full / max(1, w_disp)
-        ry = h_full / max(1, h_disp)
-        # Seed point: use local_seed_disp when available; bbox centre otherwise
-        # (local_seed_disp is None when editing an existing patch)
-        if state.local_seed_disp is not None:
-            sdx, sdy = state.local_seed_disp
-        else:
-            x0b, y0b, x1b, y1b = state.local_bbox
-            sdx, sdy = (x0b + x1b) / 2.0, (y0b + y1b) / 2.0
-        x0, y0, x1, y1 = state.local_bbox
-        local_info: dict | None = {
-            "seed":       (int(sdx * rx), int(sdy * ry)),
-            "bbox":       (int(x0 * rx), int(y0 * ry),
-                           int(x1 * rx), int(y1 * ry)),
-            "thresholds": local_vals,
-        }
+
+        rx = w_full / max(1, state.warped_display.shape[1])
+        ry = h_full / max(1, state.warped_display.shape[0])
+        full_inv_global = compute_lab_edges(state.warped_full, *global_vals)
+        full_inv_local  = compute_lab_edges(state.warped_full, *l_vals)
+        full_edges      = full_inv_global.copy()
+
+        sdx, sdy = state.local_seed_disp if state.local_seed_disp else (0, 0)
+        local_info: dict | None = None
+        if state.local_bbox is not None:
+            x0, y0, x1, y1 = state.local_bbox
+            # Scale mask to full resolution
+            mask_full = cv2.resize(state.local_mask, (w_full, h_full),
+                                   interpolation=cv2.INTER_NEAREST)
+            full_edges[mask_full > 0] = full_inv_local[mask_full > 0]
+            local_info = {
+                "seed": (int(sdx * rx), int(sdy * ry)),
+                "bbox": (int(x0 * rx), int(y0 * ry),
+                         int(x1 * rx), int(y1 * ry)),
+                "thresholds": l_vals,
+            }
     else:
         display_inv_gray = composite_base
         full_edges       = cv2.resize(composite_base, (w_full, h_full),
@@ -1863,8 +1828,8 @@ def _do_take(state: _EdgemapState) -> None:
         is_new            = True,
     )
     state.takes.append(entry)
-    state.has_take_zero    = True   # first Take establishes ground truth
-    state.preview_take_idx = None   # return to live view after taking
+    state.has_take_zero    = True
+    state.preview_take_idx = None
 
 
 # ===========================================================================
@@ -1873,13 +1838,13 @@ def _do_take(state: _EdgemapState) -> None:
 
 @dataclass
 class _ColorizeState:
-    warped_full:     np.ndarray   # full-res base image
-    warped_display:  np.ndarray   # display-res base image
-    take_inv_gray:   np.ndarray   # display-res composite edge map from the Take
-    inv_gray_full:   np.ndarray   # full-res composite edge map for final write
-    lab_patches:     list         # display-res patches for region resolution
+    warped_full:     np.ndarray
+    warped_display:  np.ndarray
+    take_inv_gray:   np.ndarray
+    inv_gray_full:   np.ndarray
+    lab_patches:     list
     super_areas:     list
-    sliders:         list         # H target, S target, V scale %
+    sliders:         list
     painted_display: np.ndarray = field(default_factory=lambda: np.zeros((1,1,3), np.uint8))
     pending_mask:    Optional[np.ndarray] = None
     pending_seed:    Optional[tuple]      = None
@@ -1925,16 +1890,13 @@ def _apply_hsv_abs(img: np.ndarray, mask: np.ndarray, h_t: int, s_t: int, v_pct:
 
 
 def _make_clr_left(cs: _ColorizeState) -> np.ndarray:
-    """Edge map: black-on-white; selected region shows actual painting colors with HSV applied."""
     img = np.full((*cs.take_inv_gray.shape, 3), (255, 255, 255), dtype=np.uint8)
     img[cs.take_inv_gray == 0] = (0, 0, 0)
 
     if cs.pending_mask is not None:
-        # Apply the current HSV adjustment to the actual painting pixels in the region
         colored = _apply_hsv_abs(cs.warped_display, cs.pending_mask,
                                   cs.sliders[0].value, cs.sliders[1].value, cs.sliders[2].value)
         img[cs.pending_mask > 0] = colored[cs.pending_mask > 0]
-        # Subtle outline — only outside the mask, thin 1px, using a neutral dark colour
         kern    = np.ones((3, 3), np.uint8)
         dilated = cv2.dilate(cs.pending_mask, kern, iterations=1)
         img[(dilated > 0) & (cs.pending_mask == 0) & (cs.take_inv_gray > 0)] = (180, 180, 60)
@@ -1947,7 +1909,6 @@ def _make_clr_left(cs: _ColorizeState) -> np.ndarray:
 
 
 def _make_clr_right(cs: _ColorizeState) -> np.ndarray:
-    """Right panel: committed colors only — no pending preview. Updates on Apply."""
     img = cs.painted_display.copy()
     cv2.rectangle(img, (0, 0), (img.shape[1], 26), (40, 60, 40), -1)
     cv2.putText(img, "PAINTED  \u2014  A=apply  S=save  R=reset  Esc=cancel",
@@ -1979,7 +1940,6 @@ def _draw_clr_ctrl(cs: _ColorizeState) -> np.ndarray:
         cv2.putText(panel, vs, (_TRACK_X1-tw, ty+24),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.48, (190, 190, 190), 1, cv2.LINE_AA)
 
-    # Dominant color swatch
     if cs.dominant_hsv is not None:
         dh, ds, dv = cs.dominant_hsv
         dbgr = cv2.cvtColor(np.array([[[dh, ds, dv]]], dtype=np.uint8), cv2.COLOR_HSV2BGR)[0, 0]
@@ -2050,7 +2010,6 @@ def _colorize_mouse(event: int, x: int, y: int, flags: int, param) -> None:
     on_R  = (_CTRL_W + lw <= x)
 
     if event == cv2.EVENT_RBUTTONDOWN and on_R and cs.committed:
-        # Remove last committed region and rebuild
         cs.committed.pop()
         cs.painted_display = cs.warped_display.copy()
         for rec in cs.committed:
@@ -2169,17 +2128,12 @@ def edit_colorize(
     base_full: np.ndarray | None = None,
     initial_committed: list | None = None,
 ) -> tuple[np.ndarray | None, list]:
-    """Two-panel colorize editor.
-    Left:  Take's composite edge map — click to select region, shows HSV preview
-    Right: Cumulative painted image — updated on each APPLY
-
-    Returns (colorized_full, committed_data) or (None, []) if cancelled.
-    """
+    """Two-panel colorize editor."""
     sliders = [
         _Slider(label=d[0], min_val=d[1], max_val=d[2], value=d[3], color=d[4])
         for d in _CLR_SLIDER_DEFS
     ]
-    disp_w, disp_h = _compute_panel_size(warped_full)
+    disp_w, disp_h = _compute_panel_size_colorize(warped_full)
     interp         = cv2.INTER_AREA if disp_w < warped_full.shape[1] else cv2.INTER_LINEAR
     warped_disp    = cv2.resize(warped_full, (disp_w, disp_h), interpolation=interp)
     painted_start  = (cv2.resize(base_display, (disp_w, disp_h), interpolation=interp)
@@ -2213,40 +2167,34 @@ def edit_colorize(
                 if m is None: continue
                 h_t, s_t, v_pct = rec["hsv"]
                 cs.painted_display = _apply_hsv_abs(cs.painted_display, m, h_t, s_t, v_pct)
-                cs.committed.append({"seed_norm": (nx,ny), "seal": seal, "hsv": (h_t,s_t,v_pct)})
-            except Exception: continue
-        if cs.committed:
-            print(f"[INFO] Restored {len(cs.committed)} committed color region(s)")
+                cs.committed.append(rec)
+            except Exception:
+                continue
 
-    cv2.namedWindow(_CLR_WINDOW, cv2.WINDOW_NORMAL)
+    cv2.namedWindow(_CLR_WINDOW, cv2.WINDOW_AUTOSIZE)
     cv2.setMouseCallback(_CLR_WINDOW, _colorize_mouse, cs)
-    cs.left_panel  = _make_clr_left(cs)
-    cs.right_panel = _make_clr_right(cs)
-    cs.left_dirty  = cs.right_dirty = False
-    ctrl = _draw_clr_ctrl(cs)
-    bh   = max(ctrl.shape[0], cs.left_panel.shape[0], cs.right_panel.shape[0])
-    cv2.imshow(_CLR_WINDOW, np.hstack([
-        _pad_to_height(ctrl, bh),
-        _pad_to_height(cs.left_panel, bh),
-        _pad_to_height(cs.right_panel, bh)]))
-    cv2.resizeWindow(_CLR_WINDOW,
-                     ctrl.shape[1] + cs.left_panel.shape[1] + cs.right_panel.shape[1], bh)
-    cv2.waitKey(1)
 
     try:
         while not cs.done:
             if cs.left_dirty:
-                cs.left_panel  = _make_clr_left(cs);  cs.left_dirty  = False
+                cs.left_panel  = _make_clr_left(cs)
+                cs.left_dirty  = False
             if cs.right_dirty:
-                cs.right_panel = _make_clr_right(cs); cs.right_dirty = False
-            ctrl = _draw_clr_ctrl(cs)
-            th   = max(ctrl.shape[0], cs.left_panel.shape[0], cs.right_panel.shape[0])
-            cv2.imshow(_CLR_WINDOW, np.hstack([
-                _pad_to_height(ctrl, th),
-                _pad_to_height(cs.left_panel, th),
-                _pad_to_height(cs.right_panel, th)]))
+                cs.right_panel = _make_clr_right(cs)
+                cs.right_dirty = False
+            ctrl  = _draw_clr_ctrl(cs)
+            h_max = max(ctrl.shape[0], cs.left_panel.shape[0], cs.right_panel.shape[0])
+            frame = np.hstack([
+                _pad_to_height(ctrl,            h_max),
+                _pad_to_height(cs.left_panel,   h_max),
+                _pad_to_height(cs.right_panel,  h_max),
+            ])
+            cv2.imshow(_CLR_WINDOW, frame)
             key = cv2.waitKey(20) & 0xFF
-            if key in (ord("a"), ord("A")): _clr_apply(cs)
+            if cv2.getWindowProperty(_CLR_WINDOW, cv2.WND_PROP_VISIBLE) < 1:
+                break
+            if key in (ord("a"), ord("A")): 
+                _clr_apply(cs)
             elif key in (ord("r"), ord("R")):
                 for sl, d in zip(cs.sliders, _CLR_SLIDER_DEFS): sl.value = d[3]
                 cs.left_dirty = cs.right_dirty = True
@@ -2254,7 +2202,10 @@ def edit_colorize(
                 if cs.committed: cs.saved = True; cs.done = True
             elif key in (27, ord("q"), ord("Q")): cs.done = True
     finally:
-        cv2.destroyWindow(_CLR_WINDOW)
+        try:
+            cv2.destroyWindow(_CLR_WINDOW)
+        except Exception:
+            pass
 
     if not cs.saved or not cs.committed:
         return None, []
@@ -2271,9 +2222,291 @@ def edit_colorize(
     return result, _committed_to_session_data(cs.committed)
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Print Preview modal
+# ===========================================================================
+
+_PP_WINDOW     = "paintscan - print preview  (S=save  Esc=close)"
+_PP_CTRL_W     = 300
+_PP_DISP_H     = 700   # target display height for centre and right panels
+
+_PP_GRAY_SLIDER_Y = 80
+_PP_BORDER_BTN_CY = 180
+_PP_GRAY_BTN_CY   = 218
+_PP_OVL_BTN_CY    = 256
+_PP_SAVE_BTN_CY   = 330
+_PP_CLOSE_BTN_CY  = 372
+_PP_BTN_W, _PP_BTN_H = 180, 30
+
+_PP_SLIDER_X0      = 20
+_PP_SLIDER_X1      = _PP_CTRL_W - 20
+_PP_THICK_SLIDER_Y = 118   # line thickness slider Y position
+
+
+@dataclass
+class _PPState:
+    display_inv_gray: np.ndarray   # editor-res inv_gray — for center panel display (no thickening)
+    edges_full:       np.ndarray   # full-res edges — for save-time thickening only
+    gray_disp:        np.ndarray   # editor-res BGR gray painting — for right panel display
+    gray_full:        np.ndarray   # full-res BGR gray painting — for save
+    take_idx:         int
+    brightness:       int  = 100   # 50–200, alpha = brightness/100
+    thickness:        int  = 2     # 0–8, dilation px at display res; scaled proportionally for save
+    overlay_on:       bool = False
+    save_target:      str  = "border"   # "border" | "gray"
+    done:             bool = False
+    dirty:            bool = True
+    ctrl_panel:       Optional[np.ndarray] = None
+    center_panel:     Optional[np.ndarray] = None
+    right_panel:      Optional[np.ndarray] = None
+
+
+def _make_border_print(inv_gray: np.ndarray, dil_px: int) -> np.ndarray:
+    """Apply dil_px-pixel dilation to inv_gray; return BGR black-on-white.
+    Called for center panel display (on display_inv_gray) and at save time
+    (on edges_full with dil_px scaled to full resolution)."""
+    out = np.full((*inv_gray.shape, 3), 255, dtype=np.uint8)
+    if dil_px > 0:
+        kernel     = np.ones((dil_px * 2 + 1, dil_px * 2 + 1), np.uint8)
+        edge_mask  = cv2.bitwise_not(inv_gray)
+        thick_mask = cv2.dilate(edge_mask, kernel, iterations=1)
+        out[thick_mask > 0] = 0
+    else:
+        out[inv_gray == 0] = 0
+    return out
+
+
+def _pp_render(ps: _PPState, disp_w: int, disp_h: int) -> None:
+    """Rebuild all three display panels into ps.*_panel."""
+    ih, iw = ps.display_inv_gray.shape[:2]
+    scale  = min(disp_w / max(iw, 1), disp_h / max(ih, 1))
+    cw     = max(1, int(round(iw * scale)))
+    ch     = max(1, int(round(ih * scale)))
+
+    # --- Centre: thickened edge map — WYSIWYG of what will be saved and printed ---
+    inv_scaled = cv2.resize(ps.display_inv_gray, (cw, ch), interpolation=cv2.INTER_AREA)
+    center_bgr = _make_border_print(inv_scaled, ps.thickness)
+    cp  = np.full((disp_h, disp_w, 3), 200, dtype=np.uint8)
+    y0c = (disp_h - ch) // 2; x0c = (disp_w - cw) // 2
+    cp[y0c:y0c+ch, x0c:x0c+cw] = center_bgr
+    ps.center_panel = cp
+
+    # --- Right: gray painting + optional overlay (same thickening as centre) ---
+    alpha  = ps.brightness / 100.0
+    gh, gw = ps.gray_disp.shape[:2]
+    gscale = min(disp_w / max(gw, 1), disp_h / max(gh, 1))
+    rw     = max(1, int(round(gw * gscale)))
+    rh     = max(1, int(round(gh * gscale)))
+    gray_b = cv2.convertScaleAbs(
+        cv2.resize(ps.gray_disp, (rw, rh), interpolation=cv2.INTER_AREA),
+        alpha=alpha, beta=0)
+    if ps.overlay_on:
+        inv_ovl    = cv2.resize(ps.display_inv_gray, (rw, rh), interpolation=cv2.INTER_NEAREST)
+        border_ovl = _make_border_print(inv_ovl, ps.thickness)
+        gray_b[np.all(border_ovl == 0, axis=2)] = 0
+    rp  = np.full((disp_h, disp_w, 3), 40, dtype=np.uint8)
+    ry0 = (disp_h - rh) // 2; rx0 = (disp_w - rw) // 2
+    rp[ry0:ry0+rh, rx0:rx0+rw] = gray_b
+    ps.right_panel = rp
+
+    # --- Left: controls ---
+    ctrl = np.full((disp_h, _PP_CTRL_W, 3), 28, dtype=np.uint8)
+
+    cv2.rectangle(ctrl, (0, 0), (_PP_CTRL_W, 28), (50, 40, 80), -1)
+    cv2.putText(ctrl, f"PRINT PREVIEW  T{ps.take_idx}",
+                (8, 19), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (255,255,255), 1, cv2.LINE_AA)
+
+    cv2.putText(ctrl, "Gray brightness", (10, _PP_GRAY_SLIDER_Y - 16),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.44, (160,160,160), 1, cv2.LINE_AA)
+    cv2.line(ctrl, (_PP_SLIDER_X0, _PP_GRAY_SLIDER_Y),
+             (_PP_SLIDER_X1, _PP_GRAY_SLIDER_Y), (80,80,80), 2)
+    hx = _PP_SLIDER_X0 + int((ps.brightness - 50) / 150 * (_PP_SLIDER_X1 - _PP_SLIDER_X0))
+    cv2.circle(ctrl, (hx, _PP_GRAY_SLIDER_Y), 9, (180,180,180), -1)
+    cv2.circle(ctrl, (hx, _PP_GRAY_SLIDER_Y), 10, (220,220,220), 1)
+    cv2.putText(ctrl, f"{ps.brightness}%", (_PP_SLIDER_X0, _PP_GRAY_SLIDER_Y + 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.40, (120,120,120), 1, cv2.LINE_AA)
+
+    cv2.putText(ctrl, "Line thickness", (10, _PP_THICK_SLIDER_Y - 16),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.44, (160,160,160), 1, cv2.LINE_AA)
+    cv2.line(ctrl, (_PP_SLIDER_X0, _PP_THICK_SLIDER_Y),
+             (_PP_SLIDER_X1, _PP_THICK_SLIDER_Y), (80,80,80), 2)
+    thx = _PP_SLIDER_X0 + int(ps.thickness / 8 * (_PP_SLIDER_X1 - _PP_SLIDER_X0))
+    cv2.circle(ctrl, (thx, _PP_THICK_SLIDER_Y), 9, (160,160,200), -1)
+    cv2.circle(ctrl, (thx, _PP_THICK_SLIDER_Y), 10, (220,220,220), 1)
+    cv2.putText(ctrl, f"{ps.thickness}px", (_PP_SLIDER_X0, _PP_THICK_SLIDER_Y + 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.40, (120,120,120), 1, cv2.LINE_AA)
+
+    cv2.line(ctrl, (10, 148), (_PP_CTRL_W-10, 148), (55,55,55), 1)
+    cv2.putText(ctrl, "Save target:", (10, 168),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.40, (120,120,120), 1, cv2.LINE_AA)
+
+    b_col = (35,130,35) if ps.save_target == "border" else (55,55,55)
+    g_col = (35,130,35) if ps.save_target == "gray"   else (55,55,55)
+    o_col = (0,140,200) if ps.overlay_on               else (55,55,55)
+    _draw_button(ctrl, "BORDER",  _PP_CTRL_W//2, _PP_BORDER_BTN_CY, b_col, _PP_BTN_W, _PP_BTN_H)
+    _draw_button(ctrl, "GRAY",    _PP_CTRL_W//2, _PP_GRAY_BTN_CY,   g_col, _PP_BTN_W, _PP_BTN_H)
+    _draw_button(ctrl, "OVERLAY", _PP_CTRL_W//2, _PP_OVL_BTN_CY,   o_col, _PP_BTN_W, _PP_BTN_H)
+
+    if ps.overlay_on and ps.save_target == "gray":
+        hint = "Overlay applied on save"
+        (hw,_),_ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.34, 1)
+        cv2.putText(ctrl, hint, (_PP_CTRL_W//2-hw//2, _PP_OVL_BTN_CY+22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.34, (0,170,230), 1, cv2.LINE_AA)
+
+    cv2.line(ctrl, (10, _PP_SAVE_BTN_CY-20), (_PP_CTRL_W-10, _PP_SAVE_BTN_CY-20), (55,55,55), 1)
+    _draw_button(ctrl, "SAVE",  _PP_CTRL_W//2, _PP_SAVE_BTN_CY,  (0, 100, 180), _PP_BTN_W, _PP_BTN_H)
+    _draw_button(ctrl, "CLOSE", _PP_CTRL_W//2, _PP_CLOSE_BTN_CY, (70,  70,  70), _PP_BTN_W, _PP_BTN_H)
+
+    ps.ctrl_panel = ctrl
+    ps.dirty      = False
+
+
+def _pp_save(ps: _PPState, out_dir: Path, stem: str, jpg_quality: int) -> None:
+    """Apply thickening at save time only."""
+    alpha  = ps.brightness / 100.0
+    gray_b = cv2.convertScaleAbs(ps.gray_full, alpha=alpha, beta=0)
+
+    # Scale thickness from display resolution to full resolution for save
+    disp_long = max(ps.display_inv_gray.shape[:2])
+    full_long  = max(ps.edges_full.shape[:2])
+    save_dil   = max(1, round(ps.thickness * full_long / disp_long)) if ps.thickness > 0 else 0
+
+    if ps.save_target == "border":
+        border_print = _make_border_print(ps.edges_full, save_dil)
+        path = out_dir / f"{stem}_print_border_T{ps.take_idx}.png"
+        cv2.imwrite(str(path), border_print)
+        print(f"[INFO] Print border saved: {path.name}")
+
+    elif ps.save_target == "gray":
+        if ps.overlay_on:
+            border_print = _make_border_print(ps.edges_full, save_dil)
+            gh, gw  = ps.gray_full.shape[:2]
+            brd_r   = cv2.resize(border_print, (gw, gh), interpolation=cv2.INTER_NEAREST)
+            edge_px = np.all(brd_r == 0, axis=2)
+            gray_b[edge_px] = 0
+            path = out_dir / f"{stem}_print_overlay_T{ps.take_idx}.png"
+            cv2.imwrite(str(path), gray_b)
+            print(f"[INFO] Print overlay saved: {path.name}")
+        else:
+            path = out_dir / f"{stem}_print_gray_T{ps.take_idx}.jpg"
+            cv2.imwrite(str(path), gray_b, [cv2.IMWRITE_JPEG_QUALITY, jpg_quality])
+            print(f"[INFO] Print gray saved: {path.name}")
+
+
+def _run_print_preview(
+    state: _EdgemapState,
+    out_dir: Path,
+    stem: str,
+    jpg_quality: int,
+) -> None:
+    """Open the Print Preview modal window.  Blocking; returns when user closes."""
+    take_entry = next(
+        (t for t in state.takes if t.index == state.print_preview_take_idx), None
+    )
+    if take_entry is None:
+        print("[WARN] Print preview: Take not found.")
+        return
+
+    # T0 loaded from a prior session has edges_full=None — recompute from thresholds.
+    edges_full = take_entry.edges_full
+    if edges_full is None:
+        print(f"[INFO] Print preview: recomputing full-res edges for T{take_entry.index}...")
+        edges_full = compute_lab_edges(state.warped_full, *take_entry.global_thresholds)
+
+    # Painting source: selected color version from disk, or master
+    painting_full = state.warped_full.copy()
+    if state.preview_color_ver_id is not None:
+        cv_path = out_dir / f"{stem}_color_v{state.preview_color_ver_id}.jpg"
+        if cv_path.exists():
+            loaded = cv2.imread(str(cv_path))
+            if loaded is not None:
+                painting_full = loaded
+
+    gray_full = cv2.cvtColor(
+        cv2.cvtColor(painting_full, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR)
+
+    # Display-res gray painting scaled to match display_inv_gray dimensions
+    dh, dw    = take_entry.display_inv_gray.shape[:2]
+    paint_d   = cv2.resize(painting_full, (dw, dh), interpolation=cv2.INTER_AREA)
+    gray_disp = cv2.cvtColor(
+        cv2.cvtColor(paint_d, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR)
+
+    ps = _PPState(
+        display_inv_gray = take_entry.display_inv_gray,
+        edges_full       = edges_full,
+        gray_disp        = gray_disp,
+        gray_full        = gray_full,
+        take_idx         = take_entry.index,
+    )
+
+    ih, iw = take_entry.display_inv_gray.shape[:2]
+    disp_h  = _PP_DISP_H
+    disp_w  = max(200, int(round(iw * disp_h / max(ih, 1))))
+
+    drag = [False]   # mutable container so nested _pp_mouse can mutate it
+
+    def _hit_pp(mx, my, cx, cy, w=_PP_BTN_W, h=_PP_BTN_H) -> bool:
+        return abs(mx - cx) <= w // 2 and abs(my - cy) <= h // 2
+
+    def _pp_mouse(event, mx, my, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            if mx < _PP_CTRL_W:
+                if abs(my - _PP_GRAY_SLIDER_Y) <= 14 and _PP_SLIDER_X0 <= mx <= _PP_SLIDER_X1:
+                    drag[0] = (1, 'brightness')
+                    ratio = (mx - _PP_SLIDER_X0) / max(1, _PP_SLIDER_X1 - _PP_SLIDER_X0)
+                    ps.brightness = int(round(50 + ratio * 150))
+                    ps.dirty = True
+                elif abs(my - _PP_THICK_SLIDER_Y) <= 14 and _PP_SLIDER_X0 <= mx <= _PP_SLIDER_X1:
+                    drag[0] = (1, 'thickness')
+                    ratio = (mx - _PP_SLIDER_X0) / max(1, _PP_SLIDER_X1 - _PP_SLIDER_X0)
+                    ps.thickness = int(round(ratio * 8))
+                    ps.dirty = True
+                elif _hit_pp(mx, my, _PP_CTRL_W//2, _PP_BORDER_BTN_CY):
+                    ps.save_target = "border"; ps.dirty = True
+                elif _hit_pp(mx, my, _PP_CTRL_W//2, _PP_GRAY_BTN_CY):
+                    ps.save_target = "gray";   ps.dirty = True
+                elif _hit_pp(mx, my, _PP_CTRL_W//2, _PP_OVL_BTN_CY):
+                    ps.overlay_on = not ps.overlay_on; ps.dirty = True
+                elif _hit_pp(mx, my, _PP_CTRL_W//2, _PP_SAVE_BTN_CY):
+                    _pp_save(ps, out_dir, stem, jpg_quality)
+                elif _hit_pp(mx, my, _PP_CTRL_W//2, _PP_CLOSE_BTN_CY):
+                    ps.done = True
+        elif event == cv2.EVENT_MOUSEMOVE:
+            if drag[0] and _PP_SLIDER_X0 <= mx <= _PP_SLIDER_X1:
+                ratio = (mx - _PP_SLIDER_X0) / max(1, _PP_SLIDER_X1 - _PP_SLIDER_X0)
+                if drag[0][1] == 'brightness':
+                    ps.brightness = int(round(50 + ratio * 150))
+                else:
+                    ps.thickness  = int(round(ratio * 8))
+                ps.dirty = True
+        elif event == cv2.EVENT_LBUTTONUP:
+            drag[0] = False
+
+    cv2.namedWindow(_PP_WINDOW, cv2.WINDOW_AUTOSIZE)
+    cv2.setMouseCallback(_PP_WINDOW, _pp_mouse)
+
+    try:
+        while not ps.done:
+            if ps.dirty:
+                _pp_render(ps, disp_w, disp_h)
+            frame = np.hstack([ps.ctrl_panel, ps.center_panel, ps.right_panel])
+            cv2.imshow(_PP_WINDOW, frame)
+            key = cv2.waitKey(30) & 0xFF
+            if cv2.getWindowProperty(_PP_WINDOW, cv2.WND_PROP_VISIBLE) < 1:
+                break
+            if key == 27 or key in (ord("q"), ord("Q")):
+                break
+            elif key in (ord("s"), ord("S")):
+                _pp_save(ps, out_dir, stem, jpg_quality)
+    finally:
+        try:
+            cv2.destroyWindow(_PP_WINDOW)
+        except Exception:
+            pass
+        
+# ===========================================================================
 # Public entry point
-# ---------------------------------------------------------------------------
+# ===========================================================================
 
 def edit_edgemap(
     warped: np.ndarray,
@@ -2289,6 +2522,9 @@ def edit_edgemap(
     initial_super_areas_data: list | None = None,
     initial_color_versions: dict | None = None,
     initial_preview_take_idx: int | None = None,
+    out_dir: Path | None = None,
+    stem: str | None = None,
+    jpg_quality: int = 92,
 ) -> tuple[list, list, list, Optional[int]]:
     """Open the three-panel Lab edge-map editor.
 
@@ -2323,13 +2559,12 @@ def edit_edgemap(
         List of take dicts from a prior session.  When provided the filmstrip
         is pre-populated with historical takes and Take 0 is NOT auto-created
         (it already exists in the list).  When None a fresh Take 0 is recorded.
+    out_dir, stem, jpg_quality:
+        Required for Print Preview saves.  Safe to omit when not using PP.
 
     Returns
     -------
-    (new_takes, patches_data, super_areas_data)
-        new_takes        – list of dicts for takes created in this session.
-        patches_data     – serialisable patch list for the session JSON.
-        super_areas_data – serialisable super-area list for the session JSON.
+    (new_takes, patches_data, super_areas_data, colorize_take_idx)
     """
     initial_vals = [l_lo, l_hi, a_lo, a_hi, b_lo, b_hi]
     sliders = [
@@ -2386,7 +2621,6 @@ def edit_edgemap(
         state.has_take_zero = True
         print(f"[INFO] Filmstrip restored: {len(state.takes)} historical take(s)")
     else:
-        # Fresh session — user must press TAKE to establish T0
         state.has_take_zero = False
 
     # Pre-select a Take (e.g. returning from colorize)
@@ -2416,7 +2650,6 @@ def edit_edgemap(
             print(f"[INFO] Restored {len(state.super_areas)} super-area(s) from session")
 
     # Recompute historical take display_inv_gray with restored patches/SAs.
-    # On initial load they were computed from global thresholds only.
     if state.patches or state.super_areas:
         for take in state.takes:
             if not take.is_new:
@@ -2432,13 +2665,12 @@ def edit_edgemap(
     cv2.setMouseCallback(_EDGEMAP_WINDOW, _edgemap_mouse, state)
 
     # Bootstrap — build the first frame, then lock the window to its exact size.
-    # No maximize: _compute_panel_size already chose the right dimensions for
-    # the screen, so the window should be exactly the frame — no more, no less.
     _boot_ctrl = _draw_ctrl_panel(
         state.sliders,
         sum(1 for t in state.takes if t.index > 0),
         state.color_idx, state.overlay_on,
-        has_take_zero=state.has_take_zero,
+        has_take_zero         = state.has_take_zero,
+        print_preview_enabled = (state.preview_take_idx is not None),
     )
     state.edge_panel, state.inv_gray_cache = _make_edge_panel(
         state.warped_display, state.sliders, state.color_idx,
@@ -2461,8 +2693,7 @@ def edit_edgemap(
     cv2.waitKey(1)
 
     try:
-        while not state.done:
-
+        while True:
             # Rebuild panels when dirty
             if state.edges_dirty and not state.local_mode and not state.merge_mode:
                 state.edge_panel, state.inv_gray_cache = _make_edge_panel(
@@ -2480,70 +2711,81 @@ def edit_edgemap(
                     patches=state.patches, super_areas=state.super_areas)
                 state.edges_dirty = False
 
-            if state.merge_dirty and state.merge_mode:
-                state.merge_edge_panel = _make_merge_edge_panel(
-                    state.warped_display, state.sliders, state.patches,
-                    state.super_areas, state.color_idx,
-                    active_sa_id=state.merge_active_sa_id)
-                state.merge_dirty = False
-
-            if state.local_dirty and state.local_mode:
-                state.local_edge_panel = _make_local_edge_panel(
-                    state.warped_display, state.sliders, state.local_sliders,
-                    state.local_mask, state.color_idx, patches=state.patches,
-                    super_areas=state.super_areas)
-                state.local_zoom_panel = _make_zoom_panel(
-                    state.warped_display, state.local_bbox)
+            if state.local_dirty:
+                if state.local_mode and state.local_mask is not None:
+                    state.local_edge_panel = _make_local_edge_panel(
+                        state.warped_display, state.sliders, state.local_sliders,
+                        state.local_mask, state.color_idx,
+                        patches=state.patches, super_areas=state.super_areas)
+                    if state.local_bbox is not None:
+                        state.local_zoom_panel = _make_zoom_panel(
+                            state.warped_display, state.local_bbox)
                 state.local_dirty = False
 
-            # Assemble frame
-            take_count = sum(1 for t in state.takes if t.index > 0)
-            ctrl_panel = _draw_ctrl_panel(
-                state.sliders, take_count, state.color_idx, state.overlay_on,
-                local_mode=state.local_mode,
-                local_sliders=state.local_sliders if state.local_mode else None,
-                local_seal=state.local_seal,
-                patch_count=len(state.patches),
-                local_patch_idx=state.local_patch_idx,
-                merge_mode=state.merge_mode,
-                merge_sliders=state.merge_sliders if state.merge_mode else None,
-                merge_active_sa_id=state.merge_active_sa_id,
-                super_area_count=len(state.super_areas),
-                has_take_zero=state.has_take_zero,
-            )
+            if state.merge_dirty and state.merge_mode:
+                state.merge_edge_panel = _make_merge_edge_panel(
+                    state.warped_display, state.sliders,
+                    state.patches, state.super_areas,
+                    state.color_idx, state.merge_active_sa_id)
+                state.merge_dirty = False
 
-            # ── Panel selection ───────────────────────────────────────────
-            if state.merge_mode:
-                mid_panel   = state.merge_edge_panel if state.merge_edge_panel is not None else state.edge_panel
+            # Choose display panels
+            if state.merge_mode and state.merge_edge_panel is not None:
+                mid_panel   = state.merge_edge_panel
                 right_panel = state.master_panel
-            elif state.local_mode:
-                mid_panel   = state.local_edge_panel if state.local_edge_panel is not None else state.edge_panel
-                right_panel = state.local_zoom_panel if state.local_zoom_panel is not None else state.master_panel
+            elif state.local_mode and state.local_edge_panel is not None:
+                mid_panel   = state.local_edge_panel
+                right_panel = (state.local_zoom_panel
+                               if state.local_zoom_panel is not None
+                               else state.master_panel)
             elif state.preview_take_idx is not None:
-                preview_entry = next(
-                    (t for t in state.takes if t.index == state.preview_take_idx), None)
-                if preview_entry is not None:
-                    mid_panel = _render_inv_gray(preview_entry.display_inv_gray, state.color_idx)
-                    # Right: color version if one is selected, else master (with optional overlay)
+                entry = next((t for t in state.takes if t.index == state.preview_take_idx), None)
+                if entry is not None:
+                    mid_panel = _render_inv_gray(entry.display_inv_gray, state.color_idx)
+                    # Right panel: selected color version or master
                     if state.preview_color_ver_id is not None:
                         cv_rec = next(
-                            (c for c in preview_entry.color_versions
+                            (c for c in entry.color_versions
                              if c.get("version_id") == state.preview_color_ver_id), None)
-                        di = cv_rec.get("display_image") if cv_rec else None
-                        right_panel = _add_border(di, _BORDER) if di is not None else state.master_panel
-                    elif state.overlay_on:
-                        _name, edge_bgr, _bg = _EDGE_COLORS[state.color_idx]
-                        ovl = state.warped_display.copy()
-                        ovl[preview_entry.display_inv_gray == 0] = edge_bgr
-                        right_panel = _add_border(ovl, _BORDER)
+                        if cv_rec is not None and cv_rec.get("thumbnail") is not None:
+                            try:
+                                th = np.array(cv_rec["thumbnail"], dtype=np.uint8)
+                                right_panel = _add_border(
+                                    cv2.resize(th, (master_scaled.shape[1], master_scaled.shape[0]),
+                                               interpolation=cv2.INTER_LINEAR), _BORDER)
+                            except Exception:
+                                right_panel = state.master_panel
+                        else:
+                            right_panel = state.master_panel
                     else:
                         right_panel = state.master_panel
                 else:
                     mid_panel   = state.edge_panel
                     right_panel = state.master_panel
+            elif state.overlay_on and state.overlay_panel is not None:
+                mid_panel   = state.edge_panel
+                right_panel = state.overlay_panel
             else:
                 mid_panel   = state.edge_panel
-                right_panel = state.overlay_panel if (state.overlay_on and state.overlay_panel is not None) else state.master_panel
+                right_panel = state.master_panel
+
+            ctrl_panel = _draw_ctrl_panel(
+                state.sliders,
+                sum(1 for t in state.takes if t.index > 0),
+                state.color_idx,
+                state.overlay_on,
+                local_mode            = state.local_mode,
+                local_sliders         = state.local_sliders or None,
+                local_seal            = state.local_seal,
+                patch_count           = len(state.patches),
+                local_patch_idx       = state.local_patch_idx,
+                merge_mode            = state.merge_mode,
+                merge_sliders         = state.merge_sliders or None,
+                merge_active_sa_id    = state.merge_active_sa_id,
+                super_area_count      = len(state.super_areas),
+                has_take_zero         = state.has_take_zero,
+                print_preview_enabled = (state.preview_take_idx is not None),
+            )
 
             target_h           = max(ctrl_panel.shape[0], mid_panel.shape[0], right_panel.shape[0])
             state.main_panel_h = target_h
@@ -2561,6 +2803,8 @@ def edit_edgemap(
 
             # Key handling
             key = cv2.waitKey(20) & 0xFF
+            if cv2.getWindowProperty(_EDGEMAP_WINDOW, cv2.WND_PROP_VISIBLE) < 1:
+                state.done = True
 
             if key in (ord("t"), ord("T")):
                 _do_take(state)
@@ -2581,7 +2825,7 @@ def edit_edgemap(
                     state.edges_dirty = True
                 elif state.merge_mode:
                     if state.merge_active_sa_id is not None:
-                        _exit_sa_edit(state)   # commit SA sliders, stay in merge mode
+                        _exit_sa_edit(state)
                         state.merge_dirty = True
                     else:
                         state.merge_mode       = False
@@ -2592,9 +2836,9 @@ def edit_edgemap(
                         for sl, v in zip(state.sliders, state.pre_seed_values):
                             sl.value = v
                         state.pre_seed_values = None
-                    state.preview_take_idx    = None
+                    state.preview_take_idx     = None
                     state.preview_color_ver_id = None
-                    state.edges_dirty         = True
+                    state.edges_dirty          = True
                 else:
                     state.done = True
 
@@ -2631,13 +2875,22 @@ def edit_edgemap(
                 else:
                     state.edges_dirty = True
 
-    finally:
-        cv2.destroyWindow(_EDGEMAP_WINDOW)
+            # Handle done — check for print preview re-entry
+            if state.done:
+                if (state.print_preview_take_idx is not None
+                        and out_dir is not None):
+                    _run_print_preview(state, out_dir, stem or "output", jpg_quality)
+                    state.print_preview_take_idx = None
+                    state.done = False
+                    continue
+                break
 
-    # Return only takes created in this session.
-    # Take 0 is included when is_new=True (fresh session) so it is recorded
-    # in the session JSON for filmstrip reconstruction on re-entry.
-    # Callers filter index > 0 before writing edge files to disk.
+    finally:
+        try:
+            cv2.destroyWindow(_EDGEMAP_WINDOW)
+        except Exception:
+            pass
+
     new_takes = [
         {
             "index":             t.index,
@@ -2653,4 +2906,7 @@ def edit_edgemap(
         if t.is_new
     ]
 
-    return new_takes, _patches_to_session_data(state.patches), _super_areas_to_session_data(state.super_areas), state.colorize_take_idx
+    return (new_takes,
+            _patches_to_session_data(state.patches),
+            _super_areas_to_session_data(state.super_areas),
+            state.colorize_take_idx)

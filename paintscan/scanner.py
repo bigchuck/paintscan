@@ -724,6 +724,9 @@ def process_image(
                 l_lo=cfg.canny_lo,   l_hi=cfg.canny_hi,
                 a_lo=cfg.lab_a_lo,   a_hi=cfg.lab_a_hi,
                 b_lo=cfg.lab_b_lo,   b_hi=cfg.lab_b_hi,
+                out_dir     = out_dir,
+                stem        = stem,
+                jpg_quality = cfg.jpg_quality,
             )
             # Write edge files only for user Takes (index >= 1)
             user_takes = [t for t in edgemap_takes if t["index"] > 0]
@@ -899,6 +902,9 @@ def process_from_master(master_path, out_dir, cfg) -> "ProcessResult":
             initial_super_areas_data = existing.super_areas,
             initial_color_versions   = cv_by_take,
             initial_preview_take_idx = _last_colorize_take,
+            out_dir     = out_dir,
+            stem        = stem,
+            jpg_quality = cfg.jpg_quality,
         )
         _last_colorize_take = None
 
