@@ -2251,7 +2251,7 @@ class _PPState:
     gray_full:        np.ndarray   # full-res BGR gray painting — for save
     take_idx:         int
     brightness:       int  = 100   # 50–200, alpha = brightness/100
-    thickness:        int  = 2     # 0–8, dilation px at display res; scaled proportionally for save
+    thickness:        int  = 0
     overlay_on:       bool = False
     save_target:      str  = "border"   # "border" | "gray"
     done:             bool = False
@@ -2267,7 +2267,10 @@ def _make_border_print(inv_gray: np.ndarray, dil_px: int) -> np.ndarray:
     (on edges_full with dil_px scaled to full resolution)."""
     out = np.full((*inv_gray.shape, 3), 255, dtype=np.uint8)
     if dil_px > 0:
-        kernel     = np.ones((dil_px * 2 + 1, dil_px * 2 + 1), np.uint8)
+        if dil_px == 1:
+            kernel = np.array([[0,1,0],[1,1,1],[0,1,0]], dtype=np.uint8)  # cross: gentler first step
+        else:
+            kernel = np.ones((dil_px * 2 + 1, dil_px * 2 + 1), np.uint8)
         edge_mask  = cv2.bitwise_not(inv_gray)
         thick_mask = cv2.dilate(edge_mask, kernel, iterations=1)
         out[thick_mask > 0] = 0
@@ -2279,35 +2282,21 @@ def _make_border_print(inv_gray: np.ndarray, dil_px: int) -> np.ndarray:
 def _pp_render(ps: _PPState, disp_w: int, disp_h: int) -> None:
     """Rebuild all three display panels into ps.*_panel."""
     ih, iw = ps.display_inv_gray.shape[:2]
-    scale  = min(disp_w / max(iw, 1), disp_h / max(ih, 1))
-    cw     = max(1, int(round(iw * scale)))
-    ch     = max(1, int(round(ih * scale)))
 
-    # --- Centre: thickened edge map — WYSIWYG of what will be saved and printed ---
-    inv_scaled = cv2.resize(ps.display_inv_gray, (cw, ch), interpolation=cv2.INTER_AREA)
-    center_bgr = _make_border_print(inv_scaled, ps.thickness)
-    cp  = np.full((disp_h, disp_w, 3), 200, dtype=np.uint8)
-    y0c = (disp_h - ch) // 2; x0c = (disp_w - cw) // 2
-    cp[y0c:y0c+ch, x0c:x0c+cw] = center_bgr
-    ps.center_panel = cp
+    # --- Centre: render at native display resolution — identical to Lab panel ---
+    center_bgr = _make_border_print(ps.display_inv_gray, ps.thickness)
+    ps.center_panel = center_bgr
 
     # --- Right: gray painting + optional overlay (same thickening as centre) ---
+    # --- Right: resize gray painting to match display_inv_gray native dims ---
     alpha  = ps.brightness / 100.0
-    gh, gw = ps.gray_disp.shape[:2]
-    gscale = min(disp_w / max(gw, 1), disp_h / max(gh, 1))
-    rw     = max(1, int(round(gw * gscale)))
-    rh     = max(1, int(round(gh * gscale)))
     gray_b = cv2.convertScaleAbs(
-        cv2.resize(ps.gray_disp, (rw, rh), interpolation=cv2.INTER_AREA),
+        cv2.resize(ps.gray_disp, (disp_w, disp_h), interpolation=cv2.INTER_AREA),
         alpha=alpha, beta=0)
     if ps.overlay_on:
-        inv_ovl    = cv2.resize(ps.display_inv_gray, (rw, rh), interpolation=cv2.INTER_NEAREST)
-        border_ovl = _make_border_print(inv_ovl, ps.thickness)
+        border_ovl = _make_border_print(ps.display_inv_gray, ps.thickness)
         gray_b[np.all(border_ovl == 0, axis=2)] = 0
-    rp  = np.full((disp_h, disp_w, 3), 40, dtype=np.uint8)
-    ry0 = (disp_h - rh) // 2; rx0 = (disp_w - rw) // 2
-    rp[ry0:ry0+rh, rx0:rx0+rw] = gray_b
-    ps.right_panel = rp
+    ps.right_panel = gray_b
 
     # --- Left: controls ---
     ctrl = np.full((disp_h, _PP_CTRL_W, 3), 28, dtype=np.uint8)
@@ -2362,28 +2351,20 @@ def _pp_render(ps: _PPState, disp_w: int, disp_h: int) -> None:
 
 
 def _pp_save(ps: _PPState, out_dir: Path, stem: str, jpg_quality: int) -> None:
-    """Apply thickening at save time only."""
+    """Save using display_inv_gray — WYSIWYG match to what is shown on screen."""
     alpha  = ps.brightness / 100.0
-    gray_b = cv2.convertScaleAbs(ps.gray_full, alpha=alpha, beta=0)
-
-    # Scale thickness from display resolution to full resolution for save
-    disp_long = max(ps.display_inv_gray.shape[:2])
-    full_long  = max(ps.edges_full.shape[:2])
-    save_dil   = max(1, round(ps.thickness * full_long / disp_long)) if ps.thickness > 0 else 0
+    gray_b = cv2.convertScaleAbs(ps.gray_disp, alpha=alpha, beta=0)
 
     if ps.save_target == "border":
-        border_print = _make_border_print(ps.edges_full, save_dil)
+        border_bgr = _make_border_print(ps.display_inv_gray, ps.thickness)
         path = out_dir / f"{stem}_print_border_T{ps.take_idx}.png"
-        cv2.imwrite(str(path), border_print)
+        cv2.imwrite(str(path), border_bgr)
         print(f"[INFO] Print border saved: {path.name}")
 
     elif ps.save_target == "gray":
         if ps.overlay_on:
-            border_print = _make_border_print(ps.edges_full, save_dil)
-            gh, gw  = ps.gray_full.shape[:2]
-            brd_r   = cv2.resize(border_print, (gw, gh), interpolation=cv2.INTER_NEAREST)
-            edge_px = np.all(brd_r == 0, axis=2)
-            gray_b[edge_px] = 0
+            border_ovl = _make_border_print(ps.display_inv_gray, ps.thickness)
+            gray_b[np.all(border_ovl == 0, axis=2)] = 0
             path = out_dir / f"{stem}_print_overlay_T{ps.take_idx}.png"
             cv2.imwrite(str(path), gray_b)
             print(f"[INFO] Print overlay saved: {path.name}")
@@ -2440,8 +2421,8 @@ def _run_print_preview(
     )
 
     ih, iw = take_entry.display_inv_gray.shape[:2]
-    disp_h  = _PP_DISP_H
-    disp_w  = max(200, int(round(iw * disp_h / max(ih, 1))))
+    disp_h  = ih   # use native display resolution — no resize, no line loss
+    disp_w  = iw
 
     drag = [False]   # mutable container so nested _pp_mouse can mutate it
 
