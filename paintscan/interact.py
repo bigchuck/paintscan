@@ -2230,17 +2230,19 @@ _PP_WINDOW     = "paintscan - print preview  (S=save  Esc=close)"
 _PP_CTRL_W     = 300
 _PP_DISP_H     = 700   # target display height for centre and right panels
 
-_PP_GRAY_SLIDER_Y = 80
-_PP_BORDER_BTN_CY = 180
-_PP_GRAY_BTN_CY   = 218
-_PP_OVL_BTN_CY    = 256
-_PP_SAVE_BTN_CY   = 330
-_PP_CLOSE_BTN_CY  = 372
+_PP_GRAY_SLIDER_Y  = 80    # brightness
+_PP_GAMMA_SLIDER_Y = 118   # shadow lift (gamma)
+_PP_FLOOR_SLIDER_Y = 156   # dark floor
+_PP_THICK_SLIDER_Y = 194   # line thickness
+_PP_BORDER_BTN_CY  = 264
+_PP_GRAY_BTN_CY    = 302
+_PP_OVL_BTN_CY     = 340
+_PP_SAVE_BTN_CY    = 414
+_PP_CLOSE_BTN_CY   = 456
 _PP_BTN_W, _PP_BTN_H = 180, 30
 
-_PP_SLIDER_X0      = 20
-_PP_SLIDER_X1      = _PP_CTRL_W - 20
-_PP_THICK_SLIDER_Y = 118   # line thickness slider Y position
+_PP_SLIDER_X0 = 20
+_PP_SLIDER_X1 = _PP_CTRL_W - 20
 
 
 @dataclass
@@ -2251,6 +2253,8 @@ class _PPState:
     gray_full:        np.ndarray   # full-res BGR gray painting — for save
     take_idx:         int
     brightness:       int  = 100   # 50–200, alpha = brightness/100
+    gamma:            int  = 100   # 40–100; internal gamma = gamma/100 (1.0=off, 0.4=max lift)
+    dark_floor:       int  = 0     # 0–128; output pixels clipped up to this floor
     thickness:        int  = 0
     overlay_on:       bool = False
     save_target:      str  = "border"   # "border" | "gray"
@@ -2293,6 +2297,13 @@ def _pp_render(ps: _PPState, disp_w: int, disp_h: int) -> None:
     gray_b = cv2.convertScaleAbs(
         cv2.resize(ps.gray_disp, (disp_w, disp_h), interpolation=cv2.INTER_AREA),
         alpha=alpha, beta=0)
+    if ps.gamma < 100:
+        g   = ps.gamma / 100.0
+        lut = np.array([int(((i / 255.0) ** g) * 255 + 0.5) for i in range(256)],
+                       dtype=np.uint8)
+        gray_b = cv2.LUT(gray_b, lut)
+    if ps.dark_floor > 0:
+        np.clip(gray_b, ps.dark_floor, 255, out=gray_b)
     if ps.overlay_on:
         border_ovl = _make_border_print(ps.display_inv_gray, ps.thickness)
         gray_b[np.all(border_ovl == 0, axis=2)] = 0
@@ -2315,6 +2326,30 @@ def _pp_render(ps: _PPState, disp_w: int, disp_h: int) -> None:
     cv2.putText(ctrl, f"{ps.brightness}%", (_PP_SLIDER_X0, _PP_GRAY_SLIDER_Y + 18),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.40, (120,120,120), 1, cv2.LINE_AA)
 
+    # --- Shadow lift (gamma) slider ---
+    cv2.putText(ctrl, "Shadow lift", (10, _PP_GAMMA_SLIDER_Y - 16),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.44, (160,200,160), 1, cv2.LINE_AA)
+    cv2.line(ctrl, (_PP_SLIDER_X0, _PP_GAMMA_SLIDER_Y),
+             (_PP_SLIDER_X1, _PP_GAMMA_SLIDER_Y), (80,80,80), 2)
+    gx       = _PP_SLIDER_X0 + int((100 - ps.gamma) / 60 * (_PP_SLIDER_X1 - _PP_SLIDER_X0))
+    cv2.circle(ctrl, (gx, _PP_GAMMA_SLIDER_Y), 9, (130,190,130), -1)
+    cv2.circle(ctrl, (gx, _PP_GAMMA_SLIDER_Y), 10, (180,230,180), 1)
+    lift_pct = int(round((100 - ps.gamma) / 60 * 100))
+    cv2.putText(ctrl, f"{lift_pct}%", (_PP_SLIDER_X0, _PP_GAMMA_SLIDER_Y + 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.40, (100,150,100), 1, cv2.LINE_AA)
+
+    # --- Dark floor slider ---
+    cv2.putText(ctrl, "Dark floor", (10, _PP_FLOOR_SLIDER_Y - 16),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.44, (160,160,210), 1, cv2.LINE_AA)
+    cv2.line(ctrl, (_PP_SLIDER_X0, _PP_FLOOR_SLIDER_Y),
+             (_PP_SLIDER_X1, _PP_FLOOR_SLIDER_Y), (80,80,80), 2)
+    dfx = _PP_SLIDER_X0 + int(ps.dark_floor / 128 * (_PP_SLIDER_X1 - _PP_SLIDER_X0))
+    cv2.circle(ctrl, (dfx, _PP_FLOOR_SLIDER_Y), 9, (130,130,200), -1)
+    cv2.circle(ctrl, (dfx, _PP_FLOOR_SLIDER_Y), 10, (180,180,230), 1)
+    cv2.putText(ctrl, f"{ps.dark_floor}", (_PP_SLIDER_X0, _PP_FLOOR_SLIDER_Y + 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.40, (100,100,160), 1, cv2.LINE_AA)
+
+    # --- Line thickness slider ---
     cv2.putText(ctrl, "Line thickness", (10, _PP_THICK_SLIDER_Y - 16),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.44, (160,160,160), 1, cv2.LINE_AA)
     cv2.line(ctrl, (_PP_SLIDER_X0, _PP_THICK_SLIDER_Y),
@@ -2325,8 +2360,9 @@ def _pp_render(ps: _PPState, disp_w: int, disp_h: int) -> None:
     cv2.putText(ctrl, f"{ps.thickness}px", (_PP_SLIDER_X0, _PP_THICK_SLIDER_Y + 18),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.40, (120,120,120), 1, cv2.LINE_AA)
 
-    cv2.line(ctrl, (10, 148), (_PP_CTRL_W-10, 148), (55,55,55), 1)
-    cv2.putText(ctrl, "Save target:", (10, 168),
+    cv2.line(ctrl, (10, _PP_THICK_SLIDER_Y + 30), (_PP_CTRL_W-10, _PP_THICK_SLIDER_Y + 30),
+             (55,55,55), 1)
+    cv2.putText(ctrl, "Save target:", (10, _PP_THICK_SLIDER_Y + 50),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.40, (120,120,120), 1, cv2.LINE_AA)
 
     b_col = (35,130,35) if ps.save_target == "border" else (55,55,55)
@@ -2354,6 +2390,13 @@ def _pp_save(ps: _PPState, out_dir: Path, stem: str, jpg_quality: int) -> None:
     """Save using display_inv_gray — WYSIWYG match to what is shown on screen."""
     alpha  = ps.brightness / 100.0
     gray_b = cv2.convertScaleAbs(ps.gray_disp, alpha=alpha, beta=0)
+    if ps.gamma < 100:
+        g   = ps.gamma / 100.0
+        lut = np.array([int(((i / 255.0) ** g) * 255 + 0.5) for i in range(256)],
+                       dtype=np.uint8)
+        gray_b = cv2.LUT(gray_b, lut)
+    if ps.dark_floor > 0:
+        np.clip(gray_b, ps.dark_floor, 255, out=gray_b)
 
     if ps.save_target == "border":
         border_bgr = _make_border_print(ps.display_inv_gray, ps.thickness)
@@ -2437,6 +2480,16 @@ def _run_print_preview(
                     ratio = (mx - _PP_SLIDER_X0) / max(1, _PP_SLIDER_X1 - _PP_SLIDER_X0)
                     ps.brightness = int(round(50 + ratio * 150))
                     ps.dirty = True
+                elif abs(my - _PP_GAMMA_SLIDER_Y) <= 14 and _PP_SLIDER_X0 <= mx <= _PP_SLIDER_X1:
+                    drag[0] = (1, 'gamma')
+                    ratio = (mx - _PP_SLIDER_X0) / max(1, _PP_SLIDER_X1 - _PP_SLIDER_X0)
+                    ps.gamma = int(round(100 - ratio * 60))
+                    ps.dirty = True
+                elif abs(my - _PP_FLOOR_SLIDER_Y) <= 14 and _PP_SLIDER_X0 <= mx <= _PP_SLIDER_X1:
+                    drag[0] = (1, 'dark_floor')
+                    ratio = (mx - _PP_SLIDER_X0) / max(1, _PP_SLIDER_X1 - _PP_SLIDER_X0)
+                    ps.dark_floor = int(round(ratio * 128))
+                    ps.dirty = True
                 elif abs(my - _PP_THICK_SLIDER_Y) <= 14 and _PP_SLIDER_X0 <= mx <= _PP_SLIDER_X1:
                     drag[0] = (1, 'thickness')
                     ratio = (mx - _PP_SLIDER_X0) / max(1, _PP_SLIDER_X1 - _PP_SLIDER_X0)
@@ -2455,8 +2508,13 @@ def _run_print_preview(
         elif event == cv2.EVENT_MOUSEMOVE:
             if drag[0] and _PP_SLIDER_X0 <= mx <= _PP_SLIDER_X1:
                 ratio = (mx - _PP_SLIDER_X0) / max(1, _PP_SLIDER_X1 - _PP_SLIDER_X0)
-                if drag[0][1] == 'brightness':
+                name  = drag[0][1]
+                if name == 'brightness':
                     ps.brightness = int(round(50 + ratio * 150))
+                elif name == 'gamma':
+                    ps.gamma      = int(round(100 - ratio * 60))
+                elif name == 'dark_floor':
+                    ps.dark_floor = int(round(ratio * 128))
                 else:
                     ps.thickness  = int(round(ratio * 8))
                 ps.dirty = True
