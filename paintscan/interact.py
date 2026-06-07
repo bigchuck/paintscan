@@ -389,7 +389,6 @@ class _EdgemapState:
     colorize_take_idx:      Optional[int] = None   # set when user hits COLORIZE
     print_preview_take_idx: Optional[int] = None   # set when user hits PRINT PREVIEW
     preview_color_ver_id:   Optional[int] = None   # which color swatch is selected
-    pre_seed_values:        Optional[list] = None  # slider values before Take was selected
     has_take_zero:          bool = False            # Take-0 exists (user has pressed TAKE once)
     base_image:             str  = "master"        # base image label for this session
 
@@ -1487,8 +1486,10 @@ def _seed_from_take(state: "_EdgemapState", take_idx: int) -> None:
         return
     for sl, val in zip(state.sliders, entry.global_thresholds):
         sl.value = val
-    state.seeded_from = take_idx
-    state.edges_dirty = True
+    state.seeded_from          = take_idx
+    state.preview_take_idx     = None
+    state.preview_color_ver_id = None
+    state.edges_dirty          = True
 
 
 def _handle_filmstrip_click(state: "_EdgemapState", x: int, raw_y: int) -> None:
@@ -1503,10 +1504,6 @@ def _handle_filmstrip_click(state: "_EdgemapState", x: int, raw_y: int) -> None:
         if state.window_w > 0:
             live_cx = state.window_w - _FILM_LIVE_R
             if _hit_button(x, raw_y, live_cx, _FILM_BTN_CY, _FILM_BTN_W, _FILM_BTN_H):
-                if state.pre_seed_values is not None:
-                    for sl, v in zip(state.sliders, state.pre_seed_values):
-                        sl.value = v
-                    state.pre_seed_values = None
                 state.preview_take_idx     = None
                 state.preview_color_ver_id = None
                 state.edges_dirty          = True
@@ -1528,20 +1525,15 @@ def _handle_filmstrip_click(state: "_EdgemapState", x: int, raw_y: int) -> None:
                 if tx + _FILM_THUMB_W > btn_rx:
                     return   # truncated slot
                 if state.preview_take_idx == entry.index:
-                    # Deselect — restore pre-seed values
-                    if state.pre_seed_values is not None:
-                        for sl, v in zip(state.sliders, state.pre_seed_values):
-                            sl.value = v
-                        state.pre_seed_values = None
+                    # Deselect — return to live
                     state.preview_take_idx     = None
                     state.preview_color_ver_id = None
                     state.edges_dirty          = True
                 else:
-                    # Select this Take
-                    state.pre_seed_values      = [sl.value for sl in state.sliders]
+                    # Select this Take — preview only, sliders untouched
                     state.preview_take_idx     = entry.index
                     state.preview_color_ver_id = None
-                    _seed_from_take(state, entry.index)
+                    state.edges_dirty          = True
         return
 
     # Bottom row
@@ -1730,10 +1722,6 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
                 if state.preview_take_idx is None:
                     _enter_local_mode(state, disp_x, disp_y)
                 else:
-                    if state.pre_seed_values is not None:
-                        for sl, v in zip(state.sliders, state.pre_seed_values):
-                            sl.value = v
-                        state.pre_seed_values = None
                     state.preview_take_idx     = None
                     state.preview_color_ver_id = None
                     state.edges_dirty          = True
@@ -2667,9 +2655,6 @@ def edit_edgemap(
         entry0 = next((t for t in state.takes if t.index == initial_preview_take_idx), None)
         if entry0 is not None:
             state.preview_take_idx = initial_preview_take_idx
-            state.pre_seed_values  = list(initial_vals)
-            for sl, val in zip(state.sliders, entry0.global_thresholds):
-                sl.value = val
 
     # --- Restore committed patches from a previous session ------------------
     if initial_patches_data:
@@ -2781,8 +2766,13 @@ def edit_edgemap(
                 entry = next((t for t in state.takes if t.index == state.preview_take_idx), None)
                 if entry is not None:
                     mid_panel = _render_inv_gray(entry.display_inv_gray, state.color_idx)
-                    # Right panel: selected color version or master
-                    if state.preview_color_ver_id is not None:
+                    # Right panel: overlay of this Take's edges on master, or color version, or master
+                    if state.overlay_on:
+                        _name, edge_bgr, _bg = _EDGE_COLORS[state.color_idx]
+                        ovl = state.warped_display.copy()
+                        ovl[entry.display_inv_gray == 0] = edge_bgr
+                        right_panel = _add_border(ovl, _BORDER)
+                    elif state.preview_color_ver_id is not None:
                         cv_rec = next(
                             (c for c in entry.color_versions
                              if c.get("version_id") == state.preview_color_ver_id), None)
@@ -2871,10 +2861,6 @@ def edit_edgemap(
                         state.merge_edge_panel = None
                         state.edges_dirty      = True
                 elif state.preview_take_idx is not None:
-                    if state.pre_seed_values is not None:
-                        for sl, v in zip(state.sliders, state.pre_seed_values):
-                            sl.value = v
-                        state.pre_seed_values = None
                     state.preview_take_idx     = None
                     state.preview_color_ver_id = None
                     state.edges_dirty          = True
