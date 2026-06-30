@@ -340,6 +340,7 @@ class SessionData:
     local_regions:      list = field(default_factory=list)   # patches (seed_norm, seal, thresholds, patch_id, super_area_id)
     super_areas:        list = field(default_factory=list)   # super-area records (super_area_id, thresholds, patch_ids)
     color_versions:     list = field(default_factory=list)   # color version records (version_id, parent_take_idx, ...)
+    pins:               list = field(default_factory=list)   # pin label records [{id, x_norm, y_norm, color, font_scale}] 
 
 
 def _thresholds_dict(
@@ -367,6 +368,7 @@ def save_session(session_path: Path, data: SessionData) -> None:
         "local_regions":      data.local_regions,
         "super_areas":        data.super_areas,
         "color_versions":     data.color_versions,
+        "pins":               data.pins,
     }
     session_path.parent.mkdir(parents=True, exist_ok=True)
     with open(session_path, "w", encoding="utf-8") as fh:
@@ -396,6 +398,7 @@ def load_session(session_path: Path) -> SessionData | None:
             local_regions      = d.get("local_regions", []),
             super_areas        = d.get("super_areas", []),
             color_versions     = d.get("color_versions", []),
+            pins               = d.get("pins", []),
         )
     except Exception:
         return None

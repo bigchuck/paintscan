@@ -719,7 +719,7 @@ def process_image(
         patches_data:  list = []
         super_areas_data: list = []
         if cfg.edgemap:
-            edgemap_takes, patches_data, super_areas_data, _clr_idx = edit_edgemap(
+            edgemap_takes, patches_data, super_areas_data, _clr_idx, _pins_data = edit_edgemap(
                 warped,
                 l_lo=cfg.canny_lo,   l_hi=cfg.canny_hi,
                 a_lo=cfg.lab_a_lo,   a_hi=cfg.lab_a_hi,
@@ -769,6 +769,7 @@ def process_image(
             takes              = takes_data,
             local_regions      = patches_data,
             super_areas        = super_areas_data,
+            pins               = _pins_data,
         )
         sess_path = session_path_for(out_dir, stem)
         save_session(sess_path, session)
@@ -891,7 +892,7 @@ def process_from_master(master_path, out_dir, cfg) -> "ProcessResult":
             cv_by_take.setdefault(ti, []).append(cv_rec)
 
         print("[INFO] Opening Lab editor …")
-        new_takes, new_patches, new_super_areas, colorize_take_idx = edit_edgemap(
+        new_takes, new_patches, new_super_areas, colorize_take_idx, new_pins = edit_edgemap(
             warped,
             l_lo=seed["l_lo"], l_hi=seed["l_hi"],
             a_lo=seed["a_lo"], a_hi=seed["a_hi"],
@@ -902,6 +903,7 @@ def process_from_master(master_path, out_dir, cfg) -> "ProcessResult":
             initial_super_areas_data = existing.super_areas,
             initial_color_versions   = cv_by_take,
             initial_preview_take_idx = _last_colorize_take,
+            initial_pins_data        = list(getattr(existing, "pins", []) or []),
             out_dir     = out_dir,
             stem        = stem,
             jpg_quality = cfg.jpg_quality,
@@ -929,6 +931,7 @@ def process_from_master(master_path, out_dir, cfg) -> "ProcessResult":
         # Update patches/super-areas if changed
         if new_patches:     existing.local_regions = new_patches
         if new_super_areas: existing.super_areas   = new_super_areas
+        existing.pins = new_pins
 
         updated = SessionData(
             schema_version     = existing.schema_version,
@@ -941,6 +944,7 @@ def process_from_master(master_path, out_dir, cfg) -> "ProcessResult":
             local_regions      = existing.local_regions,
             super_areas        = existing.super_areas,
             color_versions     = color_versions,
+            pins               = existing.pins,
         )
         save_session(sess_path, updated)
         print(f"[INFO] Session saved: {sess_path.name}  ({len(all_takes)} take(s))")

@@ -166,7 +166,20 @@ _BTN_PRINT_H   = 26
 _BTN_PRINT_CY  = 784
 _BTN_PRINT_CX  = _CTRL_W // 2   # 150
 
-_TOTAL_H = 820   # ctrl panel height (extended to fit PRINT PREVIEW button)
+_BTN_PIN_W     = 200
+_BTN_PIN_H     = 26
+_BTN_PIN_CY    = 820
+_BTN_PIN_CX    = _CTRL_W // 2   # 150
+
+_TOTAL_H = 858
+
+_PIN_WINDOW          = "paintscan - pin labels  (Esc=done)"
+_PIN_CTRL_W          = 300
+_PIN_CTRL_H          = 560
+_PIN_FONT_STEPS      = [0.4, 0.5, 0.6, 0.8, 1.0, 1.2, 1.5]
+_PIN_FONT_DEFAULT_IDX = 2    # 0.6
+_PIN_BTN_W           = 180
+_PIN_BTN_H           = 30
 
 # --- Filmstrip: two rows (Takes top, Color versions bottom) -----------------
 _FILM_ROW_H   = 108   # height of each row
@@ -392,6 +405,10 @@ class _EdgemapState:
     has_take_zero:          bool = False            # Take-0 exists (user has pressed TAKE once)
     base_image:             str  = "master"        # base image label for this session
 
+    # Pin labels
+    pins:                   list = field(default_factory=list)   # list of pin dicts
+    pin_labels_requested:   bool = False
+
 
 # ---------------------------------------------------------------------------
 # Control panel drawing
@@ -413,6 +430,7 @@ def _draw_ctrl_panel(
     super_area_count: int = 0,
     has_take_zero: bool = False,
     print_preview_enabled: bool = False,
+    pin_labels_enabled:    bool = True,
 ) -> np.ndarray:
     panel = np.full((_TOTAL_H, _CTRL_W, 3), 28, dtype=np.uint8)
 
@@ -568,6 +586,11 @@ def _draw_ctrl_panel(
         pp_col = (85, 55, 125) if print_preview_enabled else (42, 38, 50)
         _draw_button(panel, "PRINT PREVIEW", _BTN_PRINT_CX, _BTN_PRINT_CY,
                      pp_col, _BTN_PRINT_W, _BTN_PRINT_H)
+
+    # PIN LABELS button — global mode only, always enabled
+    if not local_mode and not merge_mode:
+        _draw_button(panel, "PIN LABELS", _BTN_PIN_CX, _BTN_PIN_CY,
+                    (20, 110, 160), _BTN_PIN_W, _BTN_PIN_H)
 
     return panel
 
@@ -1702,6 +1725,10 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
                     if state.preview_take_idx is not None:
                         state.print_preview_take_idx = state.preview_take_idx
                         state.done = True
+                elif _hit_button(x, y, _BTN_PIN_CX, _BTN_PIN_CY,
+                                 _BTN_PIN_W, _BTN_PIN_H):
+                    state.pin_labels_requested = True
+                    state.done = True
 
         elif on_edge_panel:
             # ---- Edge panel click ------------------------------------------
@@ -2211,8 +2238,286 @@ def edit_colorize(
 
 
 # ===========================================================================
+# Pin labeling modal
+# ===========================================================================
+
+def _pin_id_from_index(n: int) -> str:
+    """Map a zero-based sequence index to a pin ID string.
+    0->A ... 25->Z, 26->A1 ... 51->Z1, 52->A2 ... etc."""
+    letter = chr(ord("A") + (n % 26))
+    cycle  = n // 26
+    return letter if cycle == 0 else f"{letter}{cycle}"
+
+
+def _draw_pin_overlay(
+    base_bgr: np.ndarray,
+    pins: list,
+    disp_w: int,
+    disp_h: int,
+    color_override: str | None = None,
+) -> np.ndarray:
+    """Return a copy of base_bgr with all pins rendered.
+    Each pin label is centered on its stored normalized coordinate.
+    color_override forces all pins to "black" or "white" regardless of stored color."""
+    out = base_bgr.copy()
+    for p in pins:
+        px  = int(round(p["x_norm"] * disp_w))
+        py  = int(round(p["y_norm"] * disp_h))
+        px  = max(0, min(px, disp_w - 1))
+        py  = max(0, min(py, disp_h - 1))
+        c   = color_override if color_override is not None else p["color"]
+        bgr = (0, 0, 0) if c == "black" else (255, 255, 255)
+        fs  = float(p["font_scale"])
+        lbl = p["id"]
+        (tw, th), _ = cv2.getTextSize(lbl, cv2.FONT_HERSHEY_SIMPLEX, fs, 1)
+        tx  = px - tw // 2
+        ty  = py + th // 2
+        cv2.putText(out, lbl, (tx, ty),
+                    cv2.FONT_HERSHEY_SIMPLEX, fs, bgr, 1, cv2.LINE_AA)
+    return out
+
+
+@dataclass
+class _PinState:
+    warped_display:   np.ndarray
+    display_inv_gray: np.ndarray
+    pins:             list
+    assign_mode:      bool = False
+    text_color:       str  = "black"
+    font_step_idx:    int  = _PIN_FONT_DEFAULT_IDX
+    confirm_clear:    bool = False
+    done:             bool = False
+    dirty:            bool = True
+    ctrl_panel:       Optional[np.ndarray] = None
+    center_panel:     Optional[np.ndarray] = None
+    right_panel:      Optional[np.ndarray] = None
+
+
+def _draw_pin_ctrl_panel(ps: _PinState) -> np.ndarray:
+    """Build the pin labeling control panel."""
+    panel = np.full((_PIN_CTRL_H, _PIN_CTRL_W, 3), 28, dtype=np.uint8)
+    cx    = _PIN_CTRL_W // 2
+
+    cv2.putText(panel, "PIN LABELS", (cx - 52, 24),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1, cv2.LINE_AA)
+
+    n       = len(ps.pins)
+    next_id = _pin_id_from_index(n)
+    status  = f"pins: {n}   next: {next_id}"
+    (sw, _), _ = cv2.getTextSize(status, cv2.FONT_HERSHEY_SIMPLEX, 0.44, 1)
+    col = (80, 200, 80) if n > 0 else (80, 80, 80)
+    cv2.putText(panel, status, (cx - sw // 2, 52),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.44, col, 1, cv2.LINE_AA)
+
+    assign_col = (30, 160, 30) if ps.assign_mode else (55, 55, 55)
+    assign_lbl = "ASSIGN: ON " if ps.assign_mode else "ASSIGN: OFF"
+    _draw_button(panel, assign_lbl, cx, 95, assign_col, _PIN_BTN_W, _PIN_BTN_H)
+    if ps.assign_mode:
+        cv2.putText(panel, "click image to place pin", (cx - 82, 122),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.36, (60, 160, 60), 1, cv2.LINE_AA)
+
+    pop_col = (80, 60, 120) if n > 0 else (38, 38, 38)
+    _draw_button(panel, "POP", cx, 150, pop_col, _PIN_BTN_W, _PIN_BTN_H)
+
+    if ps.confirm_clear:
+        _draw_button(panel, "CONFIRM CLEAR", cx, 198, (0, 30, 180), _PIN_BTN_W, _PIN_BTN_H)
+    else:
+        clr_col = (55, 40, 100) if n > 0 else (38, 38, 38)
+        _draw_button(panel, "CLEAR ALL", cx, 198, clr_col, _PIN_BTN_W, _PIN_BTN_H)
+
+    cv2.line(panel, (20, 230), (_PIN_CTRL_W - 20, 230), (60, 60, 60), 1)
+
+    bw_lbl = "TEXT: WHITE" if ps.text_color == "white" else "TEXT: BLACK"
+    bw_col = (140, 140, 140) if ps.text_color == "white" else (30, 30, 30)
+    _draw_button(panel, bw_lbl, cx, 262, bw_col, _PIN_BTN_W, _PIN_BTN_H)
+
+    cv2.putText(panel, "font size", (cx - 32, 310),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.40, (130, 130, 130), 1, cv2.LINE_AA)
+    _draw_button(panel, "-", cx - 70, 338, (55, 55, 75), 40, 26)
+    _draw_button(panel, "+", cx + 70, 338, (55, 55, 75), 40, 26)
+    scale_str = f"{_PIN_FONT_STEPS[ps.font_step_idx]:.1f}"
+    (fsw, _), _ = cv2.getTextSize(scale_str, cv2.FONT_HERSHEY_SIMPLEX, 0.52, 1)
+    cv2.putText(panel, scale_str, (cx - fsw // 2, 344),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.52, (200, 200, 80), 1, cv2.LINE_AA)
+
+    cv2.line(panel, (20, 368), (_PIN_CTRL_W - 20, 368), (60, 60, 60), 1)
+
+    _draw_button(panel, "SAVE EDGE", cx, 400, (40, 80, 40), _PIN_BTN_W, _PIN_BTN_H)
+    _draw_button(panel, "SAVE COLOR", cx, 444, (40, 80, 40), _PIN_BTN_W, _PIN_BTN_H)
+
+    cv2.line(panel, (20, 474), (_PIN_CTRL_W - 20, 474), (60, 60, 60), 1)
+
+    _draw_button(panel, "DONE", cx, 510, (70, 70, 70), _PIN_BTN_W, _PIN_BTN_H)
+
+    return panel
+
+
+def _pin_render(ps: _PinState, disp_w: int, disp_h: int) -> None:
+    """Rebuild all three display panels into ps.*_panel."""
+    edge_bgr = np.full((disp_h, disp_w, 3), 255, dtype=np.uint8)
+    edge_bgr[ps.display_inv_gray == 0] = 0
+    ps.center_panel = _add_border(_draw_pin_overlay(edge_bgr, ps.pins, disp_w, disp_h, color_override="black"), _BORDER)
+    ps.right_panel  = _add_border(_draw_pin_overlay(ps.warped_display, ps.pins, disp_w, disp_h), _BORDER)
+    img_h         = ps.center_panel.shape[0]
+    raw_ctrl      = _draw_pin_ctrl_panel(ps)
+    ps.ctrl_panel = _pad_to_height(raw_ctrl, img_h)
+    ps.dirty      = False
+
+
+def _pin_save_edge(ps: _PinState, out_dir: Path, stem: str, jpg_quality: int,
+                   disp_w: int, disp_h: int) -> None:
+    edge_bgr = np.full((disp_h, disp_w, 3), 255, dtype=np.uint8)
+    edge_bgr[ps.display_inv_gray == 0] = 0
+    out  = _draw_pin_overlay(edge_bgr, ps.pins, disp_w, disp_h, color_override="black")
+    path = out_dir / f"{stem}_pins_edge.jpg"
+    cv2.imwrite(str(path), out, [cv2.IMWRITE_JPEG_QUALITY, jpg_quality])
+    print(f"[INFO] Pin edge saved: {path.name}")
+
+
+def _pin_save_color(ps: _PinState, out_dir: Path, stem: str, jpg_quality: int,
+                    disp_w: int, disp_h: int) -> None:
+    out  = _draw_pin_overlay(ps.warped_display, ps.pins, disp_w, disp_h)
+    path = out_dir / f"{stem}_pins_color.jpg"
+    cv2.imwrite(str(path), out, [cv2.IMWRITE_JPEG_QUALITY, jpg_quality])
+    print(f"[INFO] Pin color saved: {path.name}")
+
+
+def _run_pin_labels(
+    state: _EdgemapState,
+    out_dir: Path,
+    stem: str,
+    jpg_quality: int,
+) -> None:
+    """Open the Pin Labels modal window. Blocking; returns when user closes.
+    Writes back to state.pins on exit."""
+
+    # Use the selected Take's edge map if available; fall back to live cache
+    inv_gray = None
+    if state.preview_take_idx is not None:
+        _pin_take = next(
+            (t for t in state.takes if t.index == state.preview_take_idx), None
+        )
+        if _pin_take is not None:
+            inv_gray = _pin_take.display_inv_gray
+    if inv_gray is None:
+        inv_gray = state.inv_gray_cache
+    if inv_gray is None:
+        inv_gray = compute_lab_edges(
+            state.warped_display,
+            *[sl.value for sl in state.sliders]
+        )
+
+    dh, dw  = state.warped_display.shape[:2]
+    panel_w = dw + 2 * _BORDER
+    ctx     = {"panel_w": panel_w, "dw": dw, "dh": dh}
+
+    ps = _PinState(
+        warped_display   = state.warped_display,
+        display_inv_gray = inv_gray,
+        pins             = list(state.pins),
+    )
+
+    def _pin_mouse(event, x, y, flags, param):
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return
+
+        on_ctrl   = x < _PIN_CTRL_W
+        on_center = _PIN_CTRL_W <= x < _PIN_CTRL_W + ctx["panel_w"]
+        on_right  = x >= _PIN_CTRL_W + ctx["panel_w"]
+        cx        = _PIN_CTRL_W // 2
+
+        if on_ctrl:
+            hit_clear = _hit_button(x, y, cx, 198, _PIN_BTN_W, _PIN_BTN_H)
+
+            if _hit_button(x, y, cx, 95, _PIN_BTN_W, _PIN_BTN_H):
+                ps.assign_mode   = not ps.assign_mode
+                ps.confirm_clear = False
+            elif _hit_button(x, y, cx, 150, _PIN_BTN_W, _PIN_BTN_H):
+                if ps.pins:
+                    ps.pins.pop()
+                ps.confirm_clear = False
+            elif hit_clear:
+                if ps.confirm_clear:
+                    ps.pins.clear()
+                    ps.confirm_clear = False
+                else:
+                    ps.confirm_clear = True if ps.pins else False
+            elif _hit_button(x, y, cx, 262, _PIN_BTN_W, _PIN_BTN_H):
+                ps.text_color    = "white" if ps.text_color == "black" else "black"
+                ps.confirm_clear = False
+            elif _hit_button(x, y, cx - 70, 338, 40, 26):
+                ps.font_step_idx = max(0, ps.font_step_idx - 1)
+                ps.confirm_clear = False
+            elif _hit_button(x, y, cx + 70, 338, 40, 26):
+                ps.font_step_idx = min(len(_PIN_FONT_STEPS) - 1, ps.font_step_idx + 1)
+                ps.confirm_clear = False
+            elif _hit_button(x, y, cx, 400, _PIN_BTN_W, _PIN_BTN_H):
+                _pin_save_edge(ps, out_dir, stem, jpg_quality, ctx["dw"], ctx["dh"])
+                ps.confirm_clear = False
+            elif _hit_button(x, y, cx, 444, _PIN_BTN_W, _PIN_BTN_H):
+                _pin_save_color(ps, out_dir, stem, jpg_quality, ctx["dw"], ctx["dh"])
+                ps.confirm_clear = False
+            elif _hit_button(x, y, cx, 510, _PIN_BTN_W, _PIN_BTN_H):
+                ps.done          = True
+                ps.confirm_clear = False
+            else:
+                ps.confirm_clear = False
+            ps.dirty = True
+            return
+
+        if not ps.assign_mode:
+            return
+
+        ps.confirm_clear = False
+        if on_center:
+            img_x = x - _PIN_CTRL_W - _BORDER
+            img_y = y - _BORDER
+        elif on_right:
+            img_x = x - _PIN_CTRL_W - ctx["panel_w"] - _BORDER
+            img_y = y - _BORDER
+        else:
+            return
+
+        img_x = max(0, min(img_x, ctx["dw"] - 1))
+        img_y = max(0, min(img_y, ctx["dh"] - 1))
+
+        pin_id = _pin_id_from_index(len(ps.pins))
+        ps.pins.append({
+            "id":         pin_id,
+            "x_norm":     round(img_x / ctx["dw"], 6),
+            "y_norm":     round(img_y / ctx["dh"], 6),
+            "color":      ps.text_color,
+            "font_scale": _PIN_FONT_STEPS[ps.font_step_idx],
+        })
+        ps.dirty = True
+
+    cv2.namedWindow(_PIN_WINDOW, cv2.WINDOW_AUTOSIZE)
+    cv2.setMouseCallback(_PIN_WINDOW, _pin_mouse)
+
+    try:
+        while not ps.done:
+            if ps.dirty:
+                _pin_render(ps, dw, dh)
+            frame = np.hstack([ps.ctrl_panel, ps.center_panel, ps.right_panel])
+            cv2.imshow(_PIN_WINDOW, frame)
+            key = cv2.waitKey(30) & 0xFF
+            if cv2.getWindowProperty(_PIN_WINDOW, cv2.WND_PROP_VISIBLE) < 1:
+                break
+            if key == 27 or key in (ord("q"), ord("Q")):
+                break
+    finally:
+        try:
+            cv2.destroyWindow(_PIN_WINDOW)
+        except Exception:
+            pass
+
+    state.pins = ps.pins
+
+
+# ===========================================================================
 # Print Preview modal
 # ===========================================================================
+
 
 _PP_WINDOW     = "paintscan - print preview  (S=save  Esc=close)"
 _PP_CTRL_W     = 300
@@ -2549,10 +2854,13 @@ def edit_edgemap(
     initial_super_areas_data: list | None = None,
     initial_color_versions: dict | None = None,
     initial_preview_take_idx: int | None = None,
+    initial_pins_data: list | None = None,
     out_dir: Path | None = None,
+
     stem: str | None = None,
     jpg_quality: int = 92,
-) -> tuple[list, list, list, Optional[int]]:
+) -> tuple[list, list, list, Optional[int], list]:
+
     """Open the three-panel Lab edge-map editor.
 
     Global mode
@@ -2649,6 +2957,10 @@ def edit_edgemap(
         print(f"[INFO] Filmstrip restored: {len(state.takes)} historical take(s)")
     else:
         state.has_take_zero = False
+
+    if initial_pins_data:
+        state.pins = list(initial_pins_data)
+
 
     # Pre-select a Take (e.g. returning from colorize)
     if initial_preview_take_idx is not None:
@@ -2900,7 +3212,7 @@ def edit_edgemap(
                 else:
                     state.edges_dirty = True
 
-            # Handle done — check for print preview re-entry
+            # Handle done -- check for print preview or pin labels re-entry
             if state.done:
                 if (state.print_preview_take_idx is not None
                         and out_dir is not None):
@@ -2908,7 +3220,13 @@ def edit_edgemap(
                     state.print_preview_take_idx = None
                     state.done = False
                     continue
+                if state.pin_labels_requested and out_dir is not None:
+                    _run_pin_labels(state, out_dir, stem or "output", jpg_quality)
+                    state.pin_labels_requested = False
+                    state.done = False
+                    continue
                 break
+
 
     finally:
         try:
@@ -2934,4 +3252,5 @@ def edit_edgemap(
     return (new_takes,
             _patches_to_session_data(state.patches),
             _super_areas_to_session_data(state.super_areas),
-            state.colorize_take_idx)
+            state.colorize_take_idx,
+            state.pins)
