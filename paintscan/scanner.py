@@ -598,6 +598,7 @@ def _write_edge_takes(
         local_info  = take["local_info"]
         seeded_from = take["seeded_from"]
         base_image  = take["base_image"]
+        diff_of     = take.get("diff_of")
  
         # Three output artefacts per Take (same filenames as before)
         edges_path     = out_dir / f"{stem}_edges_{i}.jpg"
@@ -639,6 +640,7 @@ def _write_edge_takes(
                 }
                 if local_info else None
             ),
+            "diff_of": diff_of,
         }
         take_records.append(record)
  
