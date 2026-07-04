@@ -171,7 +171,17 @@ _BTN_PIN_H     = 26
 _BTN_PIN_CY    = 820
 _BTN_PIN_CX    = _CTRL_W // 2   # 150
 
-_TOTAL_H = 858
+# Info-column buttons (global mode) — relocated OVL / CLR / PRINT PREVIEW / PIN
+_INFO_CX_LOCAL = _CTRL2_W // 2            # 120 — draw coord inside the info panel
+_INFO_CX_HIT   = _CTRL_W + _CTRL2_W // 2  # 420 — global coord for hit-testing
+_INFO_BTN_W    = 150   # OVL / CLR width
+_INFO_BTN_W2   = 200   # PRINT PREVIEW / PIN LABELS width
+_INFO_OVL_CY   = 185
+_INFO_CLR_CY   = 229
+_INFO_PP_CY    = 273
+_INFO_PIN_CY   = 317
+
+_TOTAL_H = 772   # was 858; lowest Lab element is now the MERGE row (~767)
 
 _PIN_WINDOW          = "paintscan - pin labels  (Esc=done)"
 _PIN_CTRL_W          = 300
@@ -375,6 +385,8 @@ class _EdgemapState:
     local_dirty:      bool = False
     local_edge_panel: Optional[np.ndarray] = None
     local_zoom_panel: Optional[np.ndarray] = None
+    local_base_inv:   Optional[np.ndarray] = None   # base edge map for local mode; None = live sliders
+    local_base_thresholds: Optional[tuple] = None   # base thresholds when local mode is Take-based
 
     # Take history / filmstrip
     # preview_take_idx: index of the Take shown in the middle panel.
@@ -492,51 +504,13 @@ def _draw_ctrl_panel(
     _draw_button(panel, "TAKE",  _BTN_TAKE_CX,  _BTN_CY, (35, 130, 35), _BTN_W, _BTN_H)
     _draw_button(panel, "DONE",  _BTN_DONE_CX,  _BTN_CY, (70,  70, 70), _BTN_W, _BTN_H)
 
-    if take_count == 0:
-        cnt_text, cnt_col = "taken: 0", (90, 90, 90)
-    else:
-        cnt_text, cnt_col = f"taken: {take_count}", (60, 200, 60)
-    (tw, _), _ = cv2.getTextSize(cnt_text, cv2.FONT_HERSHEY_SIMPLEX, 0.50, 1)
-    cv2.putText(panel, cnt_text, (_BTN_TAKE_CX - tw // 2, _TAKE_COUNT_Y),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.50, cnt_col, 1, cv2.LINE_AA)
+    # Take / patch / super-area counts now live in the info column.
 
-    # Patches count
-    if patch_count > 0:
-        ptch_text  = f"patches: {patch_count}"
-        ptch_color = _AMBER
-    else:
-        ptch_text  = "patches: 0"
-        ptch_color = (70, 70, 70)
-    (tw, _), _ = cv2.getTextSize(ptch_text, cv2.FONT_HERSHEY_SIMPLEX, 0.44, 1)
-    cv2.putText(panel, ptch_text, (_BTN_TAKE_CX - tw // 2, _TAKE_COUNT_Y + 18),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.44, ptch_color, 1, cv2.LINE_AA)
-
-    # Super-area count
-    if super_area_count > 0:
-        sa_text  = f"super-areas: {super_area_count}"
-        sa_color = _MERGE_GREEN
-    else:
-        sa_text  = "super-areas: 0"
-        sa_color = (60, 60, 60)
-    (tw, _), _ = cv2.getTextSize(sa_text, cv2.FONT_HERSHEY_SIMPLEX, 0.40, 1)
-    cv2.putText(panel, sa_text, (_BTN_TAKE_CX - tw // 2, _TAKE_COUNT_Y + 34),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.40, sa_color, 1, cv2.LINE_AA)
-
-    # OVL / EXIT LOCAL / CLR row
-    if local_mode:
-        _draw_button(panel, "EXIT LOCAL", _BTN_OVL_CX, _OC_BTN_CY,
-                     _AMBER, _OC_BTN_W, _OC_BTN_H)
-    elif merge_mode:
-        pass   # no OVL button in merge mode
-    else:
-        ovl_label = "OVL: ON " if overlay_on else "OVL: OFF"
-        ovl_color = (35, 130, 35) if overlay_on else (60, 60, 60)
-        _draw_button(panel, ovl_label, _BTN_OVL_CX, _OC_BTN_CY,
-                     ovl_color, _OC_BTN_W, _OC_BTN_H)
-
-    clr_label = f"CLR: {_EDGE_COLORS[color_idx][0]}"
-    _draw_button(panel, clr_label, _BTN_CLR_CX, _OC_BTN_CY,
-                 (55, 55, 90), _OC_BTN_W, _OC_BTN_H)
+    # Local EXIT LOCAL + CLR now live in the info column; merge keeps its Lab-column CLR.
+    if merge_mode:
+        clr_label = f"CLR: {_EDGE_COLORS[color_idx][0]}"
+        _draw_button(panel, clr_label, _BTN_CLR_CX, _OC_BTN_CY,
+                     (55, 55, 90), _OC_BTN_W, _OC_BTN_H)
 
     # SEAL row: local controls / CLR THIS PATCH / CLR PTCH / hints
     if local_mode:
@@ -581,16 +555,7 @@ def _draw_ctrl_panel(
         cv2.putText(panel, hint2, (_CTRL_W // 2 - tw // 2, _MERGE_BTN_CY + 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.35, col2, 1, cv2.LINE_AA)
 
-    # PRINT PREVIEW button — global mode only; dims when no Take is selected
-    if not local_mode and not merge_mode:
-        pp_col = (85, 55, 125) if print_preview_enabled else (42, 38, 50)
-        _draw_button(panel, "PRINT PREVIEW", _BTN_PRINT_CX, _BTN_PRINT_CY,
-                     pp_col, _BTN_PRINT_W, _BTN_PRINT_H)
-
-    # PIN LABELS button — global mode only, always enabled
-    if not local_mode and not merge_mode:
-        _draw_button(panel, "PIN LABELS", _BTN_PIN_CX, _BTN_PIN_CY,
-                    (20, 110, 160), _BTN_PIN_W, _BTN_PIN_H)
+    # PRINT PREVIEW and PIN LABELS now live in the info column (see _draw_info_panel).
 
     return panel
 
@@ -841,10 +806,16 @@ def _make_local_edge_panel(
     color_idx: int,
     patches: list | None = None,
     super_areas: list | None = None,
+    base_inv: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Composite edge panel for local mode."""
-    composite_base = _compute_composite_inv_gray(
-        warped_display, global_sliders, patches or [], super_areas)
+    """Composite edge panel for local mode.
+    If base_inv is given (Take-based local mode) it is the base edge map;
+    otherwise the base is recomputed from the live global sliders."""
+    if base_inv is not None:
+        composite_base = base_inv
+    else:
+        composite_base = _compute_composite_inv_gray(
+            warped_display, global_sliders, patches or [], super_areas)
 
     l_vals    = [sl.value for sl in local_sliders]
     local_inv = compute_lab_edges(warped_display, *l_vals)
@@ -918,21 +889,36 @@ def _enter_local_mode(state: _EdgemapState, disp_x: int, disp_y: int) -> None:
             _enter_patch_edit_mode(state, i)
             return
 
-    if state.inv_gray_cache is None:
+    # Base map: the previewed Take if one is active, else the live composite.
+    base_inv    = None
+    base_thresh = None
+    if state.preview_take_idx is not None:
+        _bt = next((t for t in state.takes if t.index == state.preview_take_idx), None)
+        if _bt is not None:
+            base_inv    = _bt.display_inv_gray
+            base_thresh = _bt.global_thresholds
+    if base_inv is None:
+        base_inv = state.inv_gray_cache
+    if base_inv is None:
         return
-    mask = _flood_fill_region(state.inv_gray_cache, disp_x, disp_y,
-                               seal_px=state.local_seal)
+
+    mask = _flood_fill_region(base_inv, disp_x, disp_y, seal_px=state.local_seal)
     bbox = _bbox_from_mask(mask)
     if bbox is None:
         return
-    state.local_mask      = mask
-    state.local_bbox      = bbox
-    state.local_seed_disp = (disp_x, disp_y)
-    state.local_sliders   = _make_local_sliders(state.sliders)
-    state.local_init_vals = [sl.value for sl in state.local_sliders]
-    state.local_patch_idx = None
-    state.local_mode      = True
-    state.local_dirty     = True
+    state.local_mask            = mask
+    state.local_bbox            = bbox
+    state.local_seed_disp       = (disp_x, disp_y)
+    if base_thresh is not None:
+        state.local_sliders     = _make_local_sliders_from_thresholds(base_thresh)
+    else:
+        state.local_sliders     = _make_local_sliders(state.sliders)
+    state.local_init_vals       = [sl.value for sl in state.local_sliders]
+    state.local_patch_idx       = None
+    state.local_base_inv        = base_inv
+    state.local_base_thresholds = base_thresh
+    state.local_mode            = True
+    state.local_dirty           = True
 
 
 def _enter_patch_edit_mode(state: _EdgemapState, patch_idx: int) -> None:
@@ -943,15 +929,18 @@ def _enter_patch_edit_mode(state: _EdgemapState, patch_idx: int) -> None:
     state.local_sliders   = _make_local_sliders_from_thresholds(patch["thresholds"])
     state.local_init_vals = list(patch["thresholds"])
     state.local_patch_idx = patch_idx
+    state.local_base_inv        = None
+    state.local_base_thresholds = None
     state.local_mode      = True
     state.local_dirty     = True
 
 
 def _rerun_flood_fill(state: _EdgemapState) -> None:
-    if state.inv_gray_cache is None or state.local_seed_disp is None:
+    base = state.local_base_inv if state.local_base_inv is not None else state.inv_gray_cache
+    if base is None or state.local_seed_disp is None:
         return
     sx, sy = state.local_seed_disp
-    mask   = _flood_fill_region(state.inv_gray_cache, sx, sy,
+    mask   = _flood_fill_region(base, sx, sy,
                                  seal_px=state.local_seal)
     bbox   = _bbox_from_mask(mask)
     if bbox is None:
@@ -972,21 +961,19 @@ def _exit_local_mode(state: _EdgemapState) -> None:
     state.local_drag_idx   = None
     state.local_edge_panel = None
     state.local_zoom_panel = None
+    state.local_base_inv        = None
+    state.local_base_thresholds = None
 
 
 def _commit_local_patch(state: _EdgemapState) -> None:
     if state.local_mask is None or not state.local_sliders:
         return
-    local_vals  = tuple(sl.value for sl in state.local_sliders)
-    global_vals = tuple(sl.value for sl in state.sliders)
+    local_vals = tuple(sl.value for sl in state.local_sliders)
+    seed_vals  = tuple(state.local_init_vals)
 
-    if state.local_patch_idx is not None:
-        original_vals = tuple(state.local_init_vals)
-        if local_vals == original_vals:
-            return
-    else:
-        if local_vals == global_vals:
-            return
+    # No change from the seed values → nothing to commit.
+    if local_vals == seed_vals:
+        return
 
     h, w = state.warped_display.shape[:2]
     if state.local_patch_idx is not None:
@@ -1342,6 +1329,29 @@ def _draw_info_panel(state: "_EdgemapState", panel_h: int) -> np.ndarray:
     def hline(y):
         cv2.line(P, (6, y), (W-6, y), (50,50,50), 1)
 
+    # Relocated global-mode buttons: OVL / CLR / PRINT PREVIEW / PIN LABELS.
+    if not state.local_mode and not state.merge_mode:
+        hline(_INFO_OVL_CY - 24)
+        ovl_lbl = "OVL: ON " if state.overlay_on else "OVL: OFF"
+        ovl_col = (35, 130, 35) if state.overlay_on else (60, 60, 60)
+        _draw_button(P, ovl_lbl, _INFO_CX_LOCAL, _INFO_OVL_CY,
+                     ovl_col, _INFO_BTN_W, _OC_BTN_H)
+        clr_lbl = f"CLR: {_EDGE_COLORS[state.color_idx][0]}"
+        _draw_button(P, clr_lbl, _INFO_CX_LOCAL, _INFO_CLR_CY,
+                     (55, 55, 90), _INFO_BTN_W, _OC_BTN_H)
+        pp_col = (85, 55, 125) if state.preview_take_idx is not None else (42, 38, 50)
+        _draw_button(P, "PRINT PREVIEW", _INFO_CX_LOCAL, _INFO_PP_CY,
+                     pp_col, _INFO_BTN_W2, _OC_BTN_H)
+        _draw_button(P, "PIN LABELS", _INFO_CX_LOCAL, _INFO_PIN_CY,
+                     (20, 110, 160), _INFO_BTN_W2, _OC_BTN_H)
+    elif state.local_mode:
+        hline(_INFO_OVL_CY - 24)
+        _draw_button(P, "EXIT LOCAL", _INFO_CX_LOCAL, _INFO_OVL_CY,
+                     _AMBER, _INFO_BTN_W, _OC_BTN_H)
+        clr_lbl = f"CLR: {_EDGE_COLORS[state.color_idx][0]}"
+        _draw_button(P, clr_lbl, _INFO_CX_LOCAL, _INFO_CLR_CY,
+                     (55, 55, 90), _INFO_BTN_W, _OC_BTN_H)
+
     if not state.has_take_zero:
         cv2.rectangle(P, (0,0), (W,24), (30,30,90), -1)
         cv2.putText(P, "No T0 yet", (6,17), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (180,180,255), 1, cv2.LINE_AA)
@@ -1381,30 +1391,7 @@ def _draw_info_panel(state: "_EdgemapState", panel_h: int) -> np.ndarray:
     lbl(f"super-areas: {len(state.super_areas)}", y+26, col=_MERGE_GREEN if state.super_areas else (60,60,60))
     y += 36
 
-    if entry is not None and entry.color_versions:
-        hline(y); y += 4
-        cv2.rectangle(P,(0,y),(W,y+20),(60,30,70),-1)
-        cv2.putText(P,"COLOR VERSIONS",(6,y+14),cv2.FONT_HERSHEY_SIMPLEX,0.38,(200,200,200),1,cv2.LINE_AA)
-        y += 22
-        TH, TW2 = 38, 54
-        for cv_rec in entry.color_versions:
-            if y+TH+8 > panel_h-4:
-                lbl("+more", y+12, col=(80,80,80)); break
-            vid = cv_rec.get("version_id","?")
-            is_sel = (state.preview_color_ver_id == vid)
-            bdr = _ROSE if is_sel else (60,40,60)
-            thumb = cv_rec.get("thumbnail")
-            if thumb is not None:
-                try:
-                    th_s = cv2.resize(thumb,(TW2,TH),interpolation=cv2.INTER_AREA)
-                    P[y:y+TH, 8:8+TW2] = th_s
-                    cv2.rectangle(P,(7,y-1),(8+TW2,y+TH),bdr,1)
-                except Exception:
-                    pass
-            lbl(f"C{vid}", y+13, col=_ROSE if is_sel else (160,120,180), sc=0.42)
-            ts = cv_rec.get("timestamp","")[:10]
-            if ts: lbl(ts, y+27, col=(80,80,80), sc=0.34)
-            y += TH+8
+    # Color versions are shown in the filmstrip's second row, not here.
     return P
 
 
@@ -1664,13 +1651,6 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
                     _do_take(state)
                 elif _hit_button(x, y, _BTN_DONE_CX, _BTN_CY):
                     state.done = True
-                elif _hit_button(x, y, _BTN_OVL_CX, _OC_BTN_CY, _OC_BTN_W, _OC_BTN_H):
-                    _commit_local_patch(state)
-                    _exit_local_mode(state)
-                    state.edges_dirty = True
-                elif _hit_button(x, y, _BTN_CLR_CX, _OC_BTN_CY, _OC_BTN_W, _OC_BTN_H):
-                    state.color_idx   = (state.color_idx + 1) % len(_EDGE_COLORS)
-                    state.local_dirty = True
                 elif _hit_button(x, y, _SEAL_MINUS_CX, _SEAL_ROW_Y,
                                  _SEAL_PBTN_W, _SEAL_PBTN_H):
                     if state.local_patch_idx is None:
@@ -1704,12 +1684,6 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
                     _do_take(state)
                 elif _hit_button(x, y, _BTN_DONE_CX, _BTN_CY):
                     state.done = True
-                elif _hit_button(x, y, _BTN_OVL_CX, _OC_BTN_CY, _OC_BTN_W, _OC_BTN_H):
-                    state.overlay_on  = not state.overlay_on
-                    state.edges_dirty = True
-                elif _hit_button(x, y, _BTN_CLR_CX, _OC_BTN_CY, _OC_BTN_W, _OC_BTN_H):
-                    state.color_idx   = (state.color_idx + 1) % len(_EDGE_COLORS)
-                    state.edges_dirty = True
                 elif (state.patches and
                       _hit_button(x, y, _CTRL_W // 2, _SEAL_ROW_Y, 100, _SEAL_PBTN_H)):
                     state.patches.clear()
@@ -1720,15 +1694,32 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
                     state.merge_mode  = True
                     state.merge_dirty = True
                     state.edges_dirty = True
-                elif _hit_button(x, y, _BTN_PRINT_CX, _BTN_PRINT_CY,
-                                 _BTN_PRINT_W, _BTN_PRINT_H):
-                    if state.preview_take_idx is not None:
-                        state.print_preview_take_idx = state.preview_take_idx
-                        state.done = True
-                elif _hit_button(x, y, _BTN_PIN_CX, _BTN_PIN_CY,
-                                 _BTN_PIN_W, _BTN_PIN_H):
-                    state.pin_labels_requested = True
+
+        elif _CTRL_W <= x < _EP_X and not state.local_mode and not state.merge_mode:
+            # ---- Info-column buttons (global mode) -------------------------
+            if _hit_button(x, y, _INFO_CX_HIT, _INFO_OVL_CY, _INFO_BTN_W, _OC_BTN_H):
+                state.overlay_on  = not state.overlay_on
+                state.edges_dirty = True
+            elif _hit_button(x, y, _INFO_CX_HIT, _INFO_CLR_CY, _INFO_BTN_W, _OC_BTN_H):
+                state.color_idx   = (state.color_idx + 1) % len(_EDGE_COLORS)
+                state.edges_dirty = True
+            elif _hit_button(x, y, _INFO_CX_HIT, _INFO_PP_CY, _INFO_BTN_W2, _OC_BTN_H):
+                if state.preview_take_idx is not None:
+                    state.print_preview_take_idx = state.preview_take_idx
                     state.done = True
+            elif _hit_button(x, y, _INFO_CX_HIT, _INFO_PIN_CY, _INFO_BTN_W2, _OC_BTN_H):
+                state.pin_labels_requested = True
+                state.done = True
+
+        elif _CTRL_W <= x < _EP_X and state.local_mode:
+            # ---- Info-column buttons (local mode) --------------------------
+            if _hit_button(x, y, _INFO_CX_HIT, _INFO_OVL_CY, _INFO_BTN_W, _OC_BTN_H):
+                _commit_local_patch(state)
+                _exit_local_mode(state)
+                state.edges_dirty = True
+            elif _hit_button(x, y, _INFO_CX_HIT, _INFO_CLR_CY, _INFO_BTN_W, _OC_BTN_H):
+                state.color_idx   = (state.color_idx + 1) % len(_EDGE_COLORS)
+                state.local_dirty = True
 
         elif on_edge_panel:
             # ---- Edge panel click ------------------------------------------
@@ -1746,12 +1737,7 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
                 else:
                     state.local_dirty = True
             else:
-                if state.preview_take_idx is None:
-                    _enter_local_mode(state, disp_x, disp_y)
-                else:
-                    state.preview_take_idx     = None
-                    state.preview_color_ver_id = None
-                    state.edges_dirty          = True
+                _enter_local_mode(state, disp_x, disp_y)
 
     # ---- MOUSE MOVE --------------------------------------------------------
     elif event == cv2.EVENT_MOUSEMOVE:
@@ -1789,10 +1775,21 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
 def _do_take(state: _EdgemapState) -> None:
     """Compute a full-resolution edge map and append a _TakeEntry to state.takes."""
     h_full, w_full = state.warped_full.shape[:2]
-    global_vals    = tuple(sl.value for sl in state.sliders)
 
-    composite_base = _compute_composite_inv_gray(
-        state.warped_display, state.sliders, state.patches, state.super_areas)
+    # Take-based local mode: base the new Take on the previewed Take's map/thresholds.
+    take_based = (state.local_mode and state.local_mask is not None
+                  and state.local_sliders and state.local_base_inv is not None)
+
+    if take_based and state.local_base_thresholds is not None:
+        global_vals = tuple(state.local_base_thresholds)
+    else:
+        global_vals = tuple(sl.value for sl in state.sliders)
+
+    if take_based:
+        composite_base = state.local_base_inv
+    else:
+        composite_base = _compute_composite_inv_gray(
+            state.warped_display, state.sliders, state.patches, state.super_areas)
 
     if state.local_mode and state.local_mask is not None and state.local_sliders:
         l_vals    = [sl.value for sl in state.local_sliders]
@@ -1803,7 +1800,11 @@ def _do_take(state: _EdgemapState) -> None:
 
         rx = w_full / max(1, state.warped_display.shape[1])
         ry = h_full / max(1, state.warped_display.shape[0])
-        full_inv_global = compute_lab_edges(state.warped_full, *global_vals)
+        if take_based:
+            full_inv_global = cv2.resize(composite_base, (w_full, h_full),
+                                         interpolation=cv2.INTER_NEAREST)
+        else:
+            full_inv_global = compute_lab_edges(state.warped_full, *global_vals)
         full_inv_local  = compute_lab_edges(state.warped_full, *l_vals)
         full_edges      = full_inv_global.copy()
 
@@ -3052,7 +3053,8 @@ def edit_edgemap(
                     state.local_edge_panel = _make_local_edge_panel(
                         state.warped_display, state.sliders, state.local_sliders,
                         state.local_mask, state.color_idx,
-                        patches=state.patches, super_areas=state.super_areas)
+                        patches=state.patches, super_areas=state.super_areas,
+                        base_inv=state.local_base_inv)
                     if state.local_bbox is not None:
                         state.local_zoom_panel = _make_zoom_panel(
                             state.warped_display, state.local_bbox)
