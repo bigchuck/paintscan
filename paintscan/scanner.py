@@ -752,6 +752,7 @@ def process_image(
                     }
                     if t["local_info"] else None
                 ),
+                "diff_of": t.get("diff_of"),
             }
             takes_data.append(rec)
 

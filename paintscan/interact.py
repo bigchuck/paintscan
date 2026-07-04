@@ -181,6 +181,17 @@ _INFO_CLR_CY   = 229
 _INFO_PP_CY    = 273
 _INFO_PIN_CY   = 317
 
+# --- Take subtraction (DIFF) --------------------------------------------
+_INFO_DIFF_CY             = 361
+_INFO_DIFF_TOL_CY         = 399
+_INFO_DIFF_TOL_BTN_W      = 36
+_INFO_DIFF_TOL_BTN_H      = 24
+_INFO_DIFF_MINUS_CX_LOCAL = _INFO_CX_LOCAL - 40
+_INFO_DIFF_PLUS_CX_LOCAL  = _INFO_CX_LOCAL + 40
+_INFO_DIFF_MINUS_CX_HIT   = _INFO_CX_HIT - 40
+_INFO_DIFF_PLUS_CX_HIT    = _INFO_CX_HIT + 40
+_DIFF_TOL_MIN, _DIFF_TOL_MAX, _DIFF_TOL_DEFAULT = 0, 10, 3
+
 _TOTAL_H = 772   # was 858; lowest Lab element is now the MERGE row (~767)
 
 _PIN_WINDOW          = "paintscan - pin labels  (Esc=done)"
@@ -303,6 +314,7 @@ class _TakeEntry:
     patches_snapshot:  list
     is_new:            bool = True
     color_versions:    list = field(default_factory=list)  # child color versions
+    diff_of:           Optional[dict] = None   # {"a": idx, "b": idx, "tol": n} for Take-subtraction results
 
 
 # ---------------------------------------------------------------------------
@@ -420,6 +432,13 @@ class _EdgemapState:
     # Pin labels
     pins:                   list = field(default_factory=list)   # list of pin dicts
     pin_labels_requested:   bool = False
+
+    # Take subtraction (DIFF)
+    diff_armed:      bool = False
+    diff_a_idx:      Optional[int] = None
+    diff_b_idx:      Optional[int] = None
+    diff_tol:        int  = _DIFF_TOL_DEFAULT
+    diff_edge_panel: Optional[np.ndarray] = None
 
 
 # ---------------------------------------------------------------------------
@@ -1344,6 +1363,26 @@ def _draw_info_panel(state: "_EdgemapState", panel_h: int) -> np.ndarray:
                      pp_col, _INFO_BTN_W2, _OC_BTN_H)
         _draw_button(P, "PIN LABELS", _INFO_CX_LOCAL, _INFO_PIN_CY,
                      (20, 110, 160), _INFO_BTN_W2, _OC_BTN_H)
+        if state.diff_armed:
+            if state.diff_b_idx is not None:
+                diff_lbl, diff_col = "COMMIT DIFF", (0, 140, 200)
+            else:
+                diff_lbl, diff_col = "click Take B", (90, 70, 20)
+            _draw_button(P, diff_lbl, _INFO_CX_LOCAL, _INFO_DIFF_CY,
+                         diff_col, _INFO_BTN_W2, _OC_BTN_H)
+            _draw_button(P, "-", _INFO_DIFF_MINUS_CX_LOCAL, _INFO_DIFF_TOL_CY,
+                         (60, 60, 80), _INFO_DIFF_TOL_BTN_W, _INFO_DIFF_TOL_BTN_H)
+            _draw_button(P, "+", _INFO_DIFF_PLUS_CX_LOCAL, _INFO_DIFF_TOL_CY,
+                         (60, 60, 80), _INFO_DIFF_TOL_BTN_W, _INFO_DIFF_TOL_BTN_H)
+            tol_text = f"TOL: {state.diff_tol}"
+            (tw, _), _ = cv2.getTextSize(tol_text, cv2.FONT_HERSHEY_SIMPLEX, 0.44, 1)
+            cv2.putText(P, tol_text, (_INFO_CX_LOCAL - tw // 2, _INFO_DIFF_TOL_CY + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.44, (200, 160, 60), 1, cv2.LINE_AA)
+        else:
+            diff_enabled = state.preview_take_idx is not None and len(state.takes) >= 2
+            diff_col = (85, 55, 20) if diff_enabled else (42, 38, 34)
+            _draw_button(P, "DIFF", _INFO_CX_LOCAL, _INFO_DIFF_CY,
+                         diff_col, _INFO_BTN_W2, _OC_BTN_H)
     elif state.local_mode:
         hline(_INFO_OVL_CY - 24)
         _draw_button(P, "EXIT LOCAL", _INFO_CX_LOCAL, _INFO_OVL_CY,
@@ -1492,7 +1531,7 @@ def _make_filmstrip_panel(state: "_EdgemapState", total_w: int) -> np.ndarray:
 
 def _seed_from_take(state: "_EdgemapState", take_idx: int) -> None:
     entry = next((t for t in state.takes if t.index == take_idx), None)
-    if entry is None:
+    if entry is None or entry.diff_of is not None:
         return
     for sl, val in zip(state.sliders, entry.global_thresholds):
         sl.value = val
@@ -1500,6 +1539,67 @@ def _seed_from_take(state: "_EdgemapState", take_idx: int) -> None:
     state.preview_take_idx     = None
     state.preview_color_ver_id = None
     state.edges_dirty          = True
+
+
+def _make_diff_edge_panel(
+    entry_a: "_TakeEntry",
+    entry_b: "_TakeEntry",
+    tol: int,
+    color_idx: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Edge where A has an edge and B does not (within tol px).  Dilates B's
+    edge pixels by tol before subtracting, so near-coincident boundaries from
+    slightly different thresholds don't leave ghost slivers.
+    inv_gray convention: 255 = background, 0 = edge (same as elsewhere)."""
+    a_inv = entry_a.display_inv_gray
+    b_inv = entry_b.display_inv_gray
+    b_edge_mask = (b_inv == 0).astype(np.uint8) * 255
+    if tol > 0:
+        k = 2 * tol + 1
+        kernel = np.ones((k, k), np.uint8)
+        b_near = cv2.dilate(b_edge_mask, kernel, iterations=1) > 0
+    else:
+        b_near = b_edge_mask > 0
+    a_edge = (a_inv == 0)
+    diff_edge = a_edge & ~b_near
+    result = np.full_like(a_inv, 255)
+    result[diff_edge] = 0
+    return _render_inv_gray(result, color_idx), result
+
+
+def _do_diff_take(state: "_EdgemapState") -> None:
+    """Commit the armed A/B diff as a new Take."""
+    entry_a = next((t for t in state.takes if t.index == state.diff_a_idx), None)
+    entry_b = next((t for t in state.takes if t.index == state.diff_b_idx), None)
+    if entry_a is None or entry_b is None:
+        return
+    _, diff_inv = _make_diff_edge_panel(entry_a, entry_b, state.diff_tol, state.color_idx)
+    h_full, w_full = state.warped_full.shape[:2]
+    full_edges = cv2.resize(diff_inv, (w_full, h_full), interpolation=cv2.INTER_NEAREST)
+    next_idx = max((t.index for t in state.takes), default=-1) + 1
+    thumb    = _generate_thumbnail(diff_inv)
+
+    entry = _TakeEntry(
+        index             = next_idx,
+        edges_full        = full_edges,
+        display_inv_gray  = diff_inv,
+        global_thresholds = entry_a.global_thresholds,
+        local_info        = None,
+        seeded_from       = None,
+        base_image        = state.base_image,
+        thumbnail         = thumb,
+        patches_snapshot  = [],
+        is_new            = True,
+        diff_of           = {"a": state.diff_a_idx, "b": state.diff_b_idx, "tol": state.diff_tol},
+    )
+    state.takes.append(entry)
+    state.has_take_zero    = True
+    state.diff_armed       = False
+    state.diff_a_idx       = None
+    state.diff_b_idx       = None
+    state.diff_edge_panel  = None
+    state.preview_take_idx = next_idx
+    state.edges_dirty      = True
 
 
 def _handle_filmstrip_click(state: "_EdgemapState", x: int, raw_y: int) -> None:
@@ -1534,6 +1634,11 @@ def _handle_filmstrip_click(state: "_EdgemapState", x: int, raw_y: int) -> None:
                 tx = _FILM_START_X + slot*_FILM_SLOT_W + (_FILM_SLOT_W - _FILM_THUMB_W)//2
                 if tx + _FILM_THUMB_W > btn_rx:
                     return   # truncated slot
+                if state.diff_armed:
+                    if entry.index != state.diff_a_idx:
+                        state.diff_b_idx  = entry.index
+                        state.edges_dirty = True
+                    return
                 if state.preview_take_idx == entry.index:
                     # Deselect — return to live
                     state.preview_take_idx     = None
@@ -1710,6 +1815,31 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
             elif _hit_button(x, y, _INFO_CX_HIT, _INFO_PIN_CY, _INFO_BTN_W2, _OC_BTN_H):
                 state.pin_labels_requested = True
                 state.done = True
+            elif (state.diff_armed and _hit_button(
+                    x, y, _INFO_DIFF_MINUS_CX_HIT, _INFO_DIFF_TOL_CY,
+                    _INFO_DIFF_TOL_BTN_W, _INFO_DIFF_TOL_BTN_H)):
+                state.diff_tol    = max(_DIFF_TOL_MIN, state.diff_tol - 1)
+                state.edges_dirty = True
+            elif (state.diff_armed and _hit_button(
+                    x, y, _INFO_DIFF_PLUS_CX_HIT, _INFO_DIFF_TOL_CY,
+                    _INFO_DIFF_TOL_BTN_W, _INFO_DIFF_TOL_BTN_H)):
+                state.diff_tol    = min(_DIFF_TOL_MAX, state.diff_tol + 1)
+                state.edges_dirty = True
+            elif (state.diff_armed and _hit_button(
+                    x, y, _INFO_CX_HIT, _INFO_DIFF_CY, _INFO_BTN_W2, _OC_BTN_H)):
+                if state.diff_b_idx is not None:
+                    _do_diff_take(state)
+                else:
+                    state.diff_armed = False
+                    state.diff_a_idx = None
+                    state.edges_dirty = True
+            elif (not state.diff_armed and state.preview_take_idx is not None
+                  and len(state.takes) >= 2
+                  and _hit_button(x, y, _INFO_CX_HIT, _INFO_DIFF_CY, _INFO_BTN_W2, _OC_BTN_H)):
+                state.diff_armed  = True
+                state.diff_a_idx  = state.preview_take_idx
+                state.diff_b_idx  = None
+                state.edges_dirty = True
 
         elif _CTRL_W <= x < _EP_X and state.local_mode:
             # ---- Info-column buttons (local mode) --------------------------
@@ -2937,9 +3067,21 @@ def edit_edgemap(
                 int(td.get("a_lo", 30)),  int(td.get("a_hi",  90)),
                 int(td.get("b_lo", 30)),  int(td.get("b_hi",  90)),
             )
-            inv_gray  = compute_lab_edges(master_scaled, *thresholds)
+            take_idx = int(td.get("index", 0))
+            diff_of  = td.get("diff_of")
+            if diff_of is not None:
+                entry_a = next((t for t in state.takes if t.index == diff_of["a"]), None)
+                entry_b = next((t for t in state.takes if t.index == diff_of["b"]), None)
+                if entry_a is not None and entry_b is not None:
+                    _, inv_gray = _make_diff_edge_panel(
+                        entry_a, entry_b, diff_of.get("tol", _DIFF_TOL_DEFAULT), 0)
+                else:
+                    # Parent missing (shouldn't happen — diffs only reference
+                    # earlier indices, which restore in order) — fall back.
+                    inv_gray = compute_lab_edges(master_scaled, *thresholds)
+            else:
+                inv_gray = compute_lab_edges(master_scaled, *thresholds)
             thumb     = _generate_thumbnail(inv_gray)
-            take_idx  = int(td.get("index", 0))
             cvs       = (initial_color_versions or {}).get(take_idx, [])
             state.takes.append(_TakeEntry(
                 index             = take_idx,
@@ -2953,6 +3095,7 @@ def edit_edgemap(
                 patches_snapshot  = [],
                 is_new            = False,
                 color_versions    = cvs,
+                diff_of           = diff_of,
             ))
         state.has_take_zero = True
         print(f"[INFO] Filmstrip restored: {len(state.takes)} historical take(s)")
@@ -3032,7 +3175,8 @@ def edit_edgemap(
     try:
         while True:
             # Rebuild panels when dirty
-            if state.edges_dirty and not state.local_mode and not state.merge_mode:
+            if (state.edges_dirty and not state.local_mode and not state.merge_mode
+                    and not state.diff_armed):
                 state.edge_panel, state.inv_gray_cache = _make_edge_panel(
                     state.warped_display, state.sliders, state.color_idx,
                     patches=state.patches, super_areas=state.super_areas)
@@ -3046,6 +3190,14 @@ def edit_edgemap(
                 state.edge_panel, state.inv_gray_cache = _make_edge_panel(
                     state.warped_display, state.sliders, state.color_idx,
                     patches=state.patches, super_areas=state.super_areas)
+                state.edges_dirty = False
+
+            if state.edges_dirty and state.diff_armed and state.diff_b_idx is not None:
+                entry_a = next((t for t in state.takes if t.index == state.diff_a_idx), None)
+                entry_b = next((t for t in state.takes if t.index == state.diff_b_idx), None)
+                if entry_a is not None and entry_b is not None:
+                    state.diff_edge_panel, _ = _make_diff_edge_panel(
+                        entry_a, entry_b, state.diff_tol, state.color_idx)
                 state.edges_dirty = False
 
             if state.local_dirty:
@@ -3076,6 +3228,10 @@ def edit_edgemap(
                 right_panel = (state.local_zoom_panel
                                if state.local_zoom_panel is not None
                                else state.master_panel)
+            elif (state.diff_armed and state.diff_b_idx is not None
+                  and state.diff_edge_panel is not None):
+                mid_panel   = state.diff_edge_panel
+                right_panel = state.master_panel
             elif state.preview_take_idx is not None:
                 entry = next((t for t in state.takes if t.index == state.preview_take_idx), None)
                 if entry is not None:
@@ -3163,7 +3319,12 @@ def edit_edgemap(
                     state.edges_dirty = True
 
             elif key == 27:           # Esc
-                if state.local_mode:
+                if state.diff_armed:
+                    state.diff_armed   = False
+                    state.diff_a_idx   = None
+                    state.diff_b_idx   = None
+                    state.edges_dirty  = True
+                elif state.local_mode:
                     _exit_local_mode(state)
                     state.edges_dirty = True
                 elif state.merge_mode:
@@ -3246,6 +3407,7 @@ def edit_edgemap(
             "seeded_from":       t.seeded_from,
             "base_image":        t.base_image,
             "patches_snapshot":  t.patches_snapshot,
+            "diff_of":           t.diff_of,
         }
         for t in state.takes
         if t.is_new
