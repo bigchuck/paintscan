@@ -3132,7 +3132,7 @@ def edit_edgemap(
     # Recompute historical take display_inv_gray with restored patches/SAs.
     if state.patches or state.super_areas:
         for take in state.takes:
-            if not take.is_new:
+            if not take.is_new and take.diff_of is None:
                 take_sliders = [
                     _Slider(d[0], d[1], d[2], max(d[1], min(d[2], v)), d[4])
                     for d, v in zip(_SLIDER_DEFS, take.global_thresholds)
