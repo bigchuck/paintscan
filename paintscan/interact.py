@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 
 from utils import compute_lab_edges
+import points
 
 
 # ===========================================================================
@@ -191,6 +192,9 @@ _INFO_DIFF_PLUS_CX_LOCAL  = _INFO_CX_LOCAL + 40
 _INFO_DIFF_MINUS_CX_HIT   = _INFO_CX_HIT - 40
 _INFO_DIFF_PLUS_CX_HIT    = _INFO_CX_HIT + 40
 _DIFF_TOL_MIN, _DIFF_TOL_MAX, _DIFF_TOL_DEFAULT = 0, 10, 3
+
+# --- Shape export --------------------------------------------------------
+_INFO_EXPORT_CY = 443
 
 _TOTAL_H = 772   # was 858; lowest Lab element is now the MERGE row (~767)
 
@@ -439,6 +443,9 @@ class _EdgemapState:
     diff_b_idx:      Optional[int] = None
     diff_tol:        int  = _DIFF_TOL_DEFAULT
     diff_edge_panel: Optional[np.ndarray] = None
+
+    # Shape export
+    export_requested: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -1383,6 +1390,8 @@ def _draw_info_panel(state: "_EdgemapState", panel_h: int) -> np.ndarray:
             diff_col = (85, 55, 20) if diff_enabled else (42, 38, 34)
             _draw_button(P, "DIFF", _INFO_CX_LOCAL, _INFO_DIFF_CY,
                          diff_col, _INFO_BTN_W2, _OC_BTN_H)
+        _draw_button(P, "EXPORT SHAPE", _INFO_CX_LOCAL, _INFO_EXPORT_CY,
+                     (25, 100, 130), _INFO_BTN_W2, _OC_BTN_H)
     elif state.local_mode:
         hline(_INFO_OVL_CY - 24)
         _draw_button(P, "EXIT LOCAL", _INFO_CX_LOCAL, _INFO_OVL_CY,
@@ -1840,6 +1849,10 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
                 state.diff_a_idx  = state.preview_take_idx
                 state.diff_b_idx  = None
                 state.edges_dirty = True
+            elif _hit_button(x, y, _INFO_CX_HIT, _INFO_EXPORT_CY,
+                             _INFO_BTN_W2, _OC_BTN_H):
+                state.export_requested = True
+                state.done             = True
 
         elif _CTRL_W <= x < _EP_X and state.local_mode:
             # ---- Info-column buttons (local mode) --------------------------
@@ -2966,7 +2979,445 @@ def _run_print_preview(
             cv2.destroyWindow(_PP_WINDOW)
         except Exception:
             pass
-        
+
+# ===========================================================================
+# Shape export dialog  (points list)
+# ===========================================================================
+
+_EX_WINDOW = "paintscan - shape export  (E=export  R=regen  Esc=close)"
+
+_EX_CTRL_W   = 300
+_EX_CTRL_TOP = 38
+_EX_BAND_H   = 74
+_EX_HANDLE_R = 9
+
+# Slider order must match _EX_SLIDER_DEFS
+_EX_SLIDER_DEFS = [
+    ("DARKNESS",  points.DARKNESS_MIN,  points.DARKNESS_MAX,  points.DARKNESS_DEFAULT,  (120, 200, 255)),
+    ("EPS /1000", points.EPS_MIN,       points.EPS_MAX,       points.EPS_DEFAULT,       (120, 255, 160)),
+    ("MINPX",     points.MINPX_MIN,     points.MINPX_MAX,     points.MINPX_DEFAULT,     (255, 180, 120)),
+    ("MIN CHAIN", points.MIN_CHAIN_MIN, points.MIN_CHAIN_MAX, points.MIN_CHAIN_DEFAULT, (200, 160, 255)),
+    ("PRUNE",     points.PRUNE_MIN,     points.PRUNE_MAX,     points.PRUNE_DEFAULT,     (255, 220, 120)),
+]
+
+_EX_BTN_W, _EX_BTN_H = 200, 30
+_EX_BTN_CX     = _EX_CTRL_W // 2
+_EX_REGEN_CY   = _EX_CTRL_TOP + 5 * _EX_BAND_H + 30
+_EX_EXPORT_CY  = _EX_REGEN_CY + 42
+_EX_CLOSE_CY   = _EX_EXPORT_CY + 42
+_EX_STATUS_Y   = _EX_CLOSE_CY + 44
+_EX_TOTAL_H    = _EX_STATUS_Y + 150
+
+_EX_VERTEX_R   = 5      # drawn radius
+_EX_HIT_R      = 11     # click tolerance
+_EX_CHAIN_COLS = [
+    (0, 140, 255), (0, 190,  60), (200,  60, 200), (230, 160,   0),
+    (60,  60, 230), (0, 200, 200), (140,  90,   0), (90,   0, 160),
+    (0,  90, 190), (170, 170,   0), (80, 200, 120), (200, 100,  80),
+]
+_EX_END_COL    = (0, 0, 255)      # open-end ring
+_EX_ARM_COL    = (0, 255, 255)    # armed end
+_EX_CLOSED_COL = (40, 220, 40)    # closed ring
+
+
+@dataclass
+class _ExportState:
+    warped_full:    np.ndarray
+    warped_display: np.ndarray
+    flat:           np.ndarray               # flattened display-res grayscale
+    rx:             float                    # display -> full scale
+    ry:             float
+    sliders:        list = field(default_factory=list)
+    chains:         list = field(default_factory=list)   # [{pts, closed}]
+    drag_idx:       Optional[int] = None     # slider being dragged
+    vdrag:          Optional[tuple] = None   # (chain_idx, vertex_idx) being dragged
+    armed_end:      Optional[tuple] = None   # (chain_idx, 0 or -1)
+    edited:         bool = False             # any manual edit yet -> EPS locked
+    export_requested: bool = False
+    pending_eps:    Optional[int] = None     # EPS moved while locked
+    status:         str  = ""
+    status_col:     tuple = (200, 200, 200)
+    done:           bool = False
+    dirty:          bool = True
+    ctrl_panel:     Optional[np.ndarray] = None
+    work_panel:     Optional[np.ndarray] = None
+    ink_panel:      Optional[np.ndarray] = None
+
+    def val(self, i: int) -> int:
+        return self.sliders[i].value
+
+
+def _ex_regen(es: _ExportState) -> None:
+    """Rebuild chains from the current slider values.  Discards manual edits."""
+    ink = points.ink_mask(es.flat, es.val(0), es.val(2))
+    chains, _sk = points.extract_chains(ink, es.val(3), es.val(4), es.val(1))
+    es.chains      = [{"pts": c["pts"].astype(np.int32), "closed": False}
+                      for c in chains]
+    es.edited      = False
+    es.pending_eps = None
+    es.armed_end   = None
+    es.vdrag       = None
+    total = sum(len(c["pts"]) for c in es.chains)
+    es.status     = f"{len(es.chains)} chains, {total} vertices"
+    es.status_col = (200, 200, 200)
+    es.dirty      = True
+
+
+def _ex_ink(es: _ExportState) -> np.ndarray:
+    return points.ink_mask(es.flat, es.val(0), es.val(2))
+
+
+def _ex_mark_edited(es: _ExportState) -> None:
+    es.edited = True
+
+
+def _ex_hit_vertex(es: _ExportState, dx: int, dy: int) -> Optional[tuple]:
+    """Return (chain_idx, vertex_idx) of the nearest vertex within _EX_HIT_R."""
+    best, bestd = None, _EX_HIT_R ** 2
+    for ci, ch in enumerate(es.chains):
+        for vi, (x, y) in enumerate(ch["pts"]):
+            d = (int(x) - dx) ** 2 + (int(y) - dy) ** 2
+            if d <= bestd:
+                best, bestd = (ci, vi), d
+    return best
+
+
+def _ex_hit_end(es: _ExportState, dx: int, dy: int) -> Optional[tuple]:
+    """Return (chain_idx, end) where end is 0 or -1, for open chain ends only."""
+    best, bestd = None, _EX_HIT_R ** 2
+    for ci, ch in enumerate(es.chains):
+        if ch["closed"]:
+            continue
+        pts = ch["pts"]
+        for end in (0, -1):
+            x, y = pts[end]
+            d = (int(x) - dx) ** 2 + (int(y) - dy) ** 2
+            if d <= bestd:
+                best, bestd = (ci, end), d
+    return best
+
+
+def _ex_join(es: _ExportState, a: tuple, b: tuple) -> None:
+    """Join two open ends.  Same chain -> close it; different -> concatenate."""
+    ci, ce = a
+    cj, je = b
+    if ci == cj:
+        if ce != je:
+            es.chains[ci]["closed"] = True
+            es.status     = f"chain {ci + 1} closed — {len(es.chains[ci]['pts'])} vertices"
+            es.status_col = _EX_CLOSED_COL
+            _ex_mark_edited(es)
+        return
+
+    A = es.chains[ci]["pts"].copy()
+    B = es.chains[cj]["pts"].copy()
+    if ce == 0:
+        A = A[::-1]          # armed end must become A's tail
+    if je == -1:
+        B = B[::-1]          # partner end must become B's head
+    merged = np.vstack([A, B]).astype(np.int32)
+
+    for idx in sorted([ci, cj], reverse=True):
+        del es.chains[idx]
+    es.chains.append({"pts": merged, "closed": False})
+    es.status     = f"joined — {len(merged)} vertices"
+    es.status_col = (200, 200, 200)
+    _ex_mark_edited(es)
+
+
+def _ex_delete_chain(es: _ExportState, ci: int) -> None:
+    n = len(es.chains[ci]["pts"])
+    del es.chains[ci]
+    es.armed_end = None
+    es.status     = f"deleted chain ({n} vertices)"
+    es.status_col = (160, 160, 160)
+    _ex_mark_edited(es)
+
+
+def _ex_draw_ctrl(es: _ExportState) -> np.ndarray:
+    P = np.full((_EX_TOTAL_H, _EX_CTRL_W, 3), 28, dtype=np.uint8)
+    cv2.rectangle(P, (0, 0), (_EX_CTRL_W, _EX_CTRL_TOP - 4), (70, 45, 20), -1)
+    cv2.putText(P, "SHAPE EXPORT", (10, 24),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.56, (255, 255, 255), 1, cv2.LINE_AA)
+
+    for i, sl in enumerate(es.sliders):
+        ty = _EX_CTRL_TOP + i * _EX_BAND_H + 34
+        locked = (i == 1 and es.edited)
+        col    = (90, 90, 90) if locked else sl.color
+        label  = sl.label + ("  [LOCKED]" if locked else "")
+        cv2.putText(P, label, (_TRACK_X0, ty - 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.46, col, 1, cv2.LINE_AA)
+        cv2.line(P, (_TRACK_X0, ty), (_TRACK_X1, ty), (90, 90, 90), 2)
+        hx = sl.handle_x()
+        cv2.circle(P, (hx, ty), _EX_HANDLE_R, col, -1)
+        cv2.circle(P, (hx, ty), _EX_HANDLE_R + 1, (240, 240, 240), 1)
+        shown = es.pending_eps if (i == 1 and es.pending_eps is not None) else sl.value
+        txt   = str(shown)
+        (tw, _), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.46, 1)
+        cv2.putText(P, txt, (_TRACK_X1 - tw, ty + 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.46, (190, 190, 190), 1, cv2.LINE_AA)
+
+    if es.pending_eps is not None:
+        _draw_button(P, "REGEN (discards edits)", _EX_BTN_CX, _EX_REGEN_CY,
+                     (0, 110, 190), _EX_BTN_W, _EX_BTN_H)
+    else:
+        _draw_button(P, "REGEN", _EX_BTN_CX, _EX_REGEN_CY,
+                     (60, 60, 60), _EX_BTN_W, _EX_BTN_H)
+
+    n_closed = sum(1 for c in es.chains if c["closed"])
+    exp_col  = (25, 130, 25) if n_closed else (40, 48, 40)
+    exp_lbl  = f"EXPORT ({n_closed})" if n_closed else "EXPORT"
+    _draw_button(P, exp_lbl, _EX_BTN_CX, _EX_EXPORT_CY, exp_col, _EX_BTN_W, _EX_BTN_H)
+    _draw_button(P, "CLOSE", _EX_BTN_CX, _EX_CLOSE_CY, (70, 70, 70), _EX_BTN_W, _EX_BTN_H)
+
+    y = _EX_STATUS_Y
+    for line in _ex_wrap(es.status, 34):
+        cv2.putText(P, line, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                    es.status_col, 1, cv2.LINE_AA)
+        y += 18
+
+    y += 10
+    for line in ["L-click end + end = join",
+                 "L-drag vertex   = move",
+                 "R-click chain   = delete",
+                 "Same chain ends = close"]:
+        cv2.putText(P, line, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.38,
+                    (120, 120, 120), 1, cv2.LINE_AA)
+        y += 17
+    return P
+
+
+def _ex_wrap(text: str, width: int) -> list:
+    out, line = [], ""
+    for word in str(text).split():
+        if len(line) + len(word) + 1 > width:
+            out.append(line)
+            line = word
+        else:
+            line = (line + " " + word).strip()
+    if line:
+        out.append(line)
+    return out or [""]
+
+
+def _ex_draw_work(es: _ExportState) -> np.ndarray:
+    base = np.clip(255.0 - (255.0 - es.flat.astype(np.float32)) * 2.4,
+                   0, 255).astype(np.uint8)
+    img  = cv2.cvtColor(base, cv2.COLOR_GRAY2BGR)
+
+    for ci, ch in enumerate(es.chains):
+        col = _EX_CLOSED_COL if ch["closed"] else _EX_CHAIN_COLS[ci % len(_EX_CHAIN_COLS)]
+        pts = ch["pts"].reshape(-1, 1, 2)
+        cv2.polylines(img, [pts], ch["closed"], col, 2, cv2.LINE_AA)
+        for (x, y) in ch["pts"]:
+            cv2.circle(img, (int(x), int(y)), _EX_VERTEX_R, col, -1)
+            cv2.circle(img, (int(x), int(y)), _EX_VERTEX_R, (255, 255, 255), 1)
+        if not ch["closed"]:
+            for end in (0, -1):
+                x, y = ch["pts"][end]
+                cv2.circle(img, (int(x), int(y)), 9, _EX_END_COL, 2)
+
+    if es.armed_end is not None:
+        ci, end = es.armed_end
+        if 0 <= ci < len(es.chains):
+            x, y = es.chains[ci]["pts"][end]
+            cv2.circle(img, (int(x), int(y)), 13, _EX_ARM_COL, 2)
+
+    cv2.rectangle(img, (0, 0), (img.shape[1], 24), (60, 40, 15), -1)
+    cv2.putText(img, "WORKING  —  chains are proposals", (8, 17),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.44, (255, 255, 255), 1, cv2.LINE_AA)
+    return _add_border(img, _BORDER)
+
+
+def _ex_draw_ink(es: _ExportState) -> np.ndarray:
+    ink = _ex_ink(es)
+    img = cv2.cvtColor(np.where(ink > 0, 0, 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
+    cv2.rectangle(img, (0, 0), (img.shape[1], 24), (40, 40, 40), -1)
+    cv2.putText(img, f"INK  T={es.val(0)}  MINPX={es.val(2)}", (8, 17),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.44, (255, 255, 255), 1, cv2.LINE_AA)
+    return _add_border(img, _BORDER)
+
+
+def _ex_do_export(es: _ExportState, out_dir: Path) -> None:
+    """Write every closed ring to its own file."""
+    rings = [c for c in es.chains if c["closed"]]
+    if not rings:
+        es.status     = "no closed ring — join ends to close a shape"
+        es.status_col = (80, 140, 240)
+        return
+
+    dest, from_cfg = points.resolve_points_dir(out_dir)
+    h_full, w_full = es.warped_full.shape[:2]
+    written, refused = [], []
+
+    for ring in rings:
+        full_pts = points.scale_to_full(ring["pts"], es.rx, es.ry)
+        err = points.validate_ring(np.array(full_pts, dtype=np.float32),
+                                   w_full, h_full)
+        if err is not None:
+            print(f"[WARN] Export refused: {err}")
+            refused.append(err)
+            continue
+        path = points.next_points_path(dest)
+        points.write_points(path, w_full, h_full, full_pts)
+        print(f"[OK]   Points written: {path.resolve()}  ({len(full_pts)} vertices)")
+        written.append(path)
+
+    if written:
+        es.status     = f"wrote {len(written)} file(s) to {dest}"
+        es.status_col = _EX_CLOSED_COL
+    else:
+        es.status     = f"refused: {refused[0] if refused else 'unknown'}"
+        es.status_col = (80, 140, 240)
+
+
+def _ex_mouse(event, x, y, flags, es: _ExportState) -> None:
+    dh, dw = es.warped_display.shape[:2]
+    wx0 = _EX_CTRL_W + _BORDER
+    dx  = x - wx0
+    dy  = y - _BORDER
+    on_work = (0 <= dx < dw) and (0 <= dy < dh)
+
+    if event == cv2.EVENT_LBUTTONDOWN:
+        if x < _EX_CTRL_W:
+            for i, sl in enumerate(es.sliders):
+                ty = _EX_CTRL_TOP + i * _EX_BAND_H + 34
+                if (x - sl.handle_x()) ** 2 + (y - ty) ** 2 <= (_EX_HANDLE_R + 6) ** 2:
+                    es.drag_idx = i
+                    return
+            if _hit_button(x, y, _EX_BTN_CX, _EX_REGEN_CY, _EX_BTN_W, _EX_BTN_H):
+                if es.pending_eps is not None:
+                    es.sliders[1].value = es.pending_eps
+                _ex_regen(es)
+            elif _hit_button(x, y, _EX_BTN_CX, _EX_EXPORT_CY, _EX_BTN_W, _EX_BTN_H):
+                es.export_requested = True
+            elif _hit_button(x, y, _EX_BTN_CX, _EX_CLOSE_CY, _EX_BTN_W, _EX_BTN_H):
+                es.done = True
+            es.dirty = True
+            return
+
+        if not on_work:
+            return
+
+        end = _ex_hit_end(es, dx, dy)
+        if end is not None:
+            if es.armed_end is None:
+                es.armed_end  = end
+                es.status     = "end armed — click the partner end"
+                es.status_col = _EX_ARM_COL
+            else:
+                _ex_join(es, es.armed_end, end)
+                es.armed_end = None
+            es.dirty = True
+            return
+
+        v = _ex_hit_vertex(es, dx, dy)
+        if v is not None:
+            es.vdrag = v
+        es.dirty = True
+
+    elif event == cv2.EVENT_RBUTTONDOWN:
+        if not on_work:
+            return
+        v = _ex_hit_vertex(es, dx, dy)
+        if v is not None:
+            _ex_delete_chain(es, v[0])
+            es.dirty = True
+
+    elif event == cv2.EVENT_MOUSEMOVE:
+        if es.drag_idx is not None:
+            sl = es.sliders[es.drag_idx]
+            nv = sl.value_from_x(x)
+            if nv != sl.value:
+                if es.drag_idx == 1 and es.edited:
+                    es.pending_eps = nv          # locked: stage, do not apply
+                else:
+                    sl.value = nv
+                es.dirty = True
+        elif es.vdrag is not None and on_work:
+            ci, vi = es.vdrag
+            if 0 <= ci < len(es.chains):
+                es.chains[ci]["pts"][vi] = (max(0, min(dx, dw - 1)),
+                                            max(0, min(dy, dh - 1)))
+                _ex_mark_edited(es)
+                es.dirty = True
+
+    elif event == cv2.EVENT_LBUTTONUP:
+        if es.drag_idx is not None:
+            if es.edited:
+                es.status     = "sliders changed - REGEN to apply (discards edits)"
+                es.status_col = (80, 140, 240)
+            else:
+                _ex_regen(es)          # live tuning before any manual edit
+        es.drag_idx = None
+        es.vdrag    = None
+        es.dirty    = True
+
+
+def _run_export(state: "_EdgemapState", out_dir: Path) -> None:
+    """Standalone shape-export dialog.  Does not touch the session."""
+    dw, dh = _compute_panel_size_colorize(state.warped_full)
+    disp   = cv2.resize(state.warped_full, (dw, dh), interpolation=cv2.INTER_AREA)
+    h_full, w_full = state.warped_full.shape[:2]
+
+    es = _ExportState(
+        warped_full    = state.warped_full,
+        warped_display = disp,
+        flat           = points.prepare(disp),
+        rx             = w_full / max(1, dw),
+        ry             = h_full / max(1, dh),
+    )
+    es.sliders = [
+        _Slider(label=d[0], min_val=d[1], max_val=d[2], value=d[3], color=d[4])
+        for d in _EX_SLIDER_DEFS
+    ]
+    _ex_regen(es)
+
+    cv2.namedWindow(_EX_WINDOW, cv2.WINDOW_AUTOSIZE)
+    cv2.setMouseCallback(_EX_WINDOW, _ex_mouse, es)
+    try:
+        while not es.done:
+            if es.dirty:
+                es.ctrl_panel = _ex_draw_ctrl(es)
+                es.work_panel = _ex_draw_work(es)
+                es.ink_panel  = _ex_draw_ink(es)
+                es.dirty = False
+            target_h = max(es.ctrl_panel.shape[0],
+                           es.work_panel.shape[0],
+                           es.ink_panel.shape[0])
+            frame = np.hstack([_pad_to_height(es.ctrl_panel, target_h),
+                               _pad_to_height(es.work_panel, target_h),
+                               _pad_to_height(es.ink_panel,  target_h)])
+            cv2.imshow(_EX_WINDOW, frame)
+
+            if es.export_requested:
+                es.export_requested = False
+                _ex_do_export(es, out_dir)
+                es.dirty = True
+
+            key = cv2.waitKey(20) & 0xFF
+            if cv2.getWindowProperty(_EX_WINDOW, cv2.WND_PROP_VISIBLE) < 1:
+                break
+            if key == 27 or key in (ord("q"), ord("Q")):
+                if es.armed_end is not None:
+                    es.armed_end = None
+                    es.status    = "join cancelled"
+                    es.dirty     = True
+                else:
+                    break
+            elif key in (ord("e"), ord("E")):
+                _ex_do_export(es, out_dir)
+                es.dirty = True
+            elif key in (ord("r"), ord("R")):
+                if es.pending_eps is not None:
+                    es.sliders[1].value = es.pending_eps
+                _ex_regen(es)
+    finally:
+        try:
+            cv2.destroyWindow(_EX_WINDOW)
+        except Exception:
+            pass
+
 # ===========================================================================
 # Public entry point
 # ===========================================================================
@@ -3386,6 +3837,11 @@ def edit_edgemap(
                 if state.pin_labels_requested and out_dir is not None:
                     _run_pin_labels(state, out_dir, stem or "output", jpg_quality)
                     state.pin_labels_requested = False
+                    state.done = False
+                    continue
+                if state.export_requested and out_dir is not None:
+                    _run_export(state, out_dir)
+                    state.export_requested = False
                     state.done = False
                     continue
                 break

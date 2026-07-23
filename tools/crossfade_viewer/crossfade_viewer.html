@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crossfade Viewer</title>
+<style>
+  :root{
+    --bg:        #15141a;
+    --panel:     #1e1c24;
+    --panel-2:   #26232d;
+    --line:      #35323d;
+    --ink:       #e8e4da;
+    --ink-dim:   #8b8790;
+    --amber:     #e8a33d;
+    --amber-dim: #6b5530;
+  }
+  *{ box-sizing:border-box; }
+  html,body{
+    margin:0; height:100%; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+    overflow:hidden;
+  }
+  #app{ height:100vh; display:flex; flex-direction:column; }
+
+  /* ---------- Dropzone (initial state) ---------- */
+  #dropzone{
+    flex:1; display:flex; align-items:center; justify-content:center;
+    margin:24px; border:2px dashed var(--line); border-radius:12px;
+    transition:border-color .15s, background .15s;
+    cursor:pointer;
+  }
+  #dropzone.drag{ border-color:var(--amber); background:rgba(232,163,61,0.05); }
+  #dropzone .msg{ text-align:center; color:var(--ink-dim); max-width:420px; padding:0 20px; }
+  #dropzone .msg .big{ color:var(--ink); font-size:20px; margin-bottom:10px; }
+  #dropzone .msg .small{ font-size:13px; line-height:1.5; }
+  #dropzone .msg kbd{
+    background:var(--panel-2); border:1px solid var(--line); border-radius:4px;
+    padding:1px 6px; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px;
+  }
+
+  /* ---------- Viewer ---------- */
+  #viewer{ flex:1; display:flex; flex-direction:column; min-height:0; }
+  #viewer.hidden, #dropzone.hidden{ display:none; }
+
+  .stage{
+    flex:1; position:relative; min-height:0;
+    background:#0c0b0f;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .layer{
+    position:absolute; max-width:96%; max-height:96%;
+    top:50%; left:50%; transform:translate(-50%,-50%);
+    box-shadow:0 12px 40px rgba(0,0,0,0.55);
+    opacity:0;
+  }
+  .layer.top{ opacity:1; }
+
+  .hud{
+    position:absolute; top:14px; left:18px; right:18px;
+    display:flex; justify-content:space-between; align-items:baseline;
+    pointer-events:none; opacity:0.85;
+  }
+  .hud #filename{
+    font-size:13px; color:var(--ink);
+    background:rgba(15,14,18,0.55); padding:4px 10px; border-radius:6px;
+    font-family:ui-monospace,Menlo,Consolas,monospace;
+  }
+  .hud #counter{
+    font-size:12px; color:var(--ink-dim);
+    background:rgba(15,14,18,0.55); padding:4px 10px; border-radius:6px;
+    font-family:ui-monospace,Menlo,Consolas,monospace;
+  }
+
+  /* ---------- Controls ---------- */
+  #controls{
+    flex:none; display:flex; align-items:center; gap:18px;
+    padding:12px 20px; background:var(--panel); border-top:1px solid var(--line);
+  }
+  .btn{
+    background:var(--panel-2); border:1px solid var(--line); color:var(--ink);
+    border-radius:8px; padding:8px 14px; font-size:14px; cursor:pointer;
+    display:flex; align-items:center; gap:6px;
+  }
+  .btn:hover{ border-color:var(--amber-dim); }
+  .btn.primary{ background:var(--amber); color:#241b08; border-color:var(--amber); font-weight:600; }
+  .btn.primary:hover{ filter:brightness(1.08); }
+  .btn.icon{ padding:8px 11px; }
+
+  .slider-group{ display:flex; flex-direction:column; gap:2px; min-width:150px; }
+  .slider-group label{
+    font-size:11px; color:var(--ink-dim); display:flex; justify-content:space-between;
+    font-family:ui-monospace,Menlo,Consolas,monospace;
+  }
+  input[type=range]{
+    -webkit-appearance:none; width:100%; height:4px; border-radius:2px;
+    background:var(--line); outline:none;
+  }
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none; width:14px; height:14px; border-radius:50%;
+    background:var(--amber); cursor:pointer; border:2px solid #241b08;
+  }
+  input[type=range]::-moz-range-thumb{
+    width:14px; height:14px; border-radius:50%;
+    background:var(--amber); cursor:pointer; border:2px solid #241b08;
+  }
+
+  .spacer{ flex:1; }
+  #addMoreBtn{ font-size:13px; }
+
+  /* ---------- Filmstrip ---------- */
+  #filmstrip{
+    flex:none; display:flex; gap:6px; padding:10px 14px; overflow-x:auto;
+    background:var(--panel); border-top:1px solid var(--line);
+  }
+  #filmstrip::-webkit-scrollbar{ height:6px; }
+  #filmstrip::-webkit-scrollbar-thumb{ background:var(--line); border-radius:3px; }
+  .thumb{
+    flex:none; width:74px; height:56px; border-radius:5px; overflow:hidden;
+    border:2px solid transparent; cursor:grab; position:relative;
+    opacity:0.55; transition:opacity .12s, border-color .12s;
+    background:#0c0b0f;
+  }
+  .thumb img{ width:100%; height:100%; object-fit:cover; display:block; }
+  .thumb.active{ opacity:1; border-color:var(--amber); }
+  .thumb:hover{ opacity:0.85; }
+  .thumb.dragover{ border-color:var(--ink-dim); }
+  .thumb .idx{
+    position:absolute; bottom:2px; right:3px; font-size:9px; color:#fff;
+    background:rgba(0,0,0,0.55); padding:0 4px; border-radius:3px;
+    font-family:ui-monospace,Menlo,Consolas,monospace;
+  }
+
+  input[type=file]{ display:none; }
+
+  /* ---------- Dropzone secondary action ---------- */
+  #folderLink{
+    margin-top:14px; background:none; border:none; color:var(--amber);
+    font-size:12.5px; text-decoration:underline; cursor:pointer; padding:0;
+  }
+  #folderLink:hover{ color:#f4bd66; }
+
+  /* ---------- Folder-filter modal ---------- */
+  #folderModal{
+    position:fixed; inset:0; background:rgba(10,9,12,0.72);
+    display:flex; align-items:center; justify-content:center; z-index:10;
+  }
+  #folderModal.hidden{ display:none; }
+  .modal-card{
+    background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    width:420px; max-width:90vw; padding:22px 24px;
+    box-shadow:0 20px 60px rgba(0,0,0,0.5);
+  }
+  .modal-card h3{ margin:0 0 4px; font-size:16px; color:var(--ink); }
+  .modal-card .sub{ font-size:12px; color:var(--ink-dim); margin-bottom:18px; line-height:1.5; }
+  .field{ margin-bottom:14px; }
+  .field label{
+    display:block; font-size:11px; color:var(--ink-dim); margin-bottom:4px;
+    font-family:ui-monospace,Menlo,Consolas,monospace;
+  }
+  .field input[type=text]{
+    width:100%; background:var(--panel-2); border:1px solid var(--line); color:var(--ink);
+    border-radius:6px; padding:8px 10px; font-size:13px;
+    font-family:ui-monospace,Menlo,Consolas,monospace;
+  }
+  .field input[type=text]:focus{ outline:none; border-color:var(--amber-dim); }
+  .field .hint{ font-size:11px; color:var(--ink-dim); margin-top:4px; }
+  #matchCount{
+    font-size:12.5px; color:var(--ink); margin:6px 0 18px;
+    background:var(--panel-2); border-radius:6px; padding:8px 10px;
+  }
+  #matchCount .n{ color:var(--amber); font-weight:600; }
+  .modal-actions{ display:flex; justify-content:flex-end; gap:10px; }
+
+  .notice{
+    font-size:12px; line-height:1.5; border-radius:8px; padding:10px 12px;
+    margin-bottom:16px; border:1px solid var(--amber-dim); background:rgba(232,163,61,0.08);
+    color:var(--ink);
+  }
+  .notice code{
+    background:var(--panel-2); border-radius:4px; padding:1px 5px;
+    font-family:ui-monospace,Menlo,Consolas,monospace;
+  }
+  .notice.quiet{ border-color:var(--line); background:var(--panel-2); color:var(--ink-dim); }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <div id="dropzone">
+    <div class="msg">
+      <div class="big">Drop painting images here</div>
+      <div class="small">
+        Drag in <code>_600.jpg</code> / <code>_master.jpg</code> files from each session,
+        or click to browse. Sorted by filename &mdash; drag thumbnails below to reorder.
+        Nothing leaves this browser tab; no server involved.
+      </div>
+      <button type="button" id="folderLink">Or load from a folder, filtered by subdir + filename&hellip;</button>
+    </div>
+  </div>
+
+  <div id="viewer" class="hidden">
+    <div class="stage">
+      <img id="imgA" class="layer">
+      <img id="imgB" class="layer">
+      <div class="hud">
+        <span id="filename"></span>
+        <span id="counter"></span>
+      </div>
+    </div>
+
+    <div id="controls">
+      <button class="btn icon" id="prevBtn" title="Previous (&larr;)">&#9664;</button>
+      <button class="btn primary icon" id="playBtn" title="Play / Pause (Space)">&#9654;</button>
+      <button class="btn icon" id="nextBtn" title="Next (&rarr;)">&#9654;&#9654;</button>
+
+      <div class="slider-group">
+        <label>Fade <span id="fadeVal">0.8s</span></label>
+        <input type="range" id="fadeSlider" min="100" max="4000" step="50" value="800">
+      </div>
+      <div class="slider-group">
+        <label>Hold <span id="holdVal">1.5s</span></label>
+        <input type="range" id="holdSlider" min="200" max="8000" step="100" value="1500">
+      </div>
+
+      <div class="spacer"></div>
+      <button class="btn" id="fullscreenBtn">Fullscreen</button>
+      <button class="btn" id="addMoreBtn">Add images&hellip;</button>
+      <button class="btn" id="addFolderBtn">Add from folder&hellip;</button>
+    </div>
+
+    <div id="filmstrip"></div>
+  </div>
+
+  <div id="folderModal" class="hidden">
+    <div class="modal-card">
+      <h3>Load from folder</h3>
+      <div class="sub">
+        Set your masks, then choose a folder. Where supported, only subdirectory
+        names and matching filenames get read &mdash; non-matching subdirs are
+        never opened, so a big project directory won't get fully scanned.
+      </div>
+      <div id="modeNotice" class="notice quiet">Checking browser capabilities&hellip;</div>
+      <div class="field">
+        <label>SUBDIR MASK</label>
+        <input type="text" id="subdirMaskInput" placeholder="* (all subdirs)" value="*">
+        <div class="hint">Matches immediate subdirectory names of the chosen folder, e.g. <code>2024-*</code> or <code>session_*</code>. Files directly in the chosen folder are always considered.</div>
+      </div>
+      <div class="field">
+        <label>FILE MASK</label>
+        <input type="text" id="fileMaskInput" placeholder="* (all files)" value="*_600.jpg">
+        <div class="hint">Matches against the filename only, e.g. <code>*_600.jpg</code> or <code>*_master.jpg</code>.</div>
+      </div>
+      <div id="matchCount">Choose a folder to scan.</div>
+      <div class="modal-actions">
+        <button class="btn" id="folderCancelBtn">Cancel</button>
+        <button class="btn" id="chooseFolderBtn">Choose folder&hellip;</button>
+        <button class="btn primary" id="folderLoadBtn">Load matching files</button>
+      </div>
+    </div>
+  </div>
+
+  <input type="file" id="fileInput" accept="image/*" multiple>
+  <input type="file" id="folderInput" webkitdirectory directory multiple>
+</div>
+
+<script>
+(() => {
+  const dropzone   = document.getElementById('dropzone');
+  const viewer     = document.getElementById('viewer');
+  const fileInput  = document.getElementById('fileInput');
+  const imgA       = document.getElementById('imgA');
+  const imgB       = document.getElementById('imgB');
+  const filenameEl = document.getElementById('filename');
+  const counterEl  = document.getElementById('counter');
+  const filmstrip  = document.getElementById('filmstrip');
+  const playBtn    = document.getElementById('playBtn');
+  const prevBtn    = document.getElementById('prevBtn');
+  const nextBtn    = document.getElementById('nextBtn');
+  const fadeSlider = document.getElementById('fadeSlider');
+  const holdSlider = document.getElementById('holdSlider');
+  const fadeVal    = document.getElementById('fadeVal');
+  const holdVal    = document.getElementById('holdVal');
+  const fullscreenBtn = document.getElementById('fullscreenBtn');
+  const addMoreBtn = document.getElementById('addMoreBtn');
+  const folderLink    = document.getElementById('folderLink');
+  const addFolderBtn  = document.getElementById('addFolderBtn');
+  const folderInput   = document.getElementById('folderInput');
+  const folderModal   = document.getElementById('folderModal');
+  const subdirMaskInput = document.getElementById('subdirMaskInput');
+  const fileMaskInput   = document.getElementById('fileMaskInput');
+  const matchCountEl    = document.getElementById('matchCount');
+  const folderCancelBtn = document.getElementById('folderCancelBtn');
+  const folderLoadBtn   = document.getElementById('folderLoadBtn');
+  const chooseFolderBtn = document.getElementById('chooseFolderBtn');
+  const modeNoticeEl    = document.getElementById('modeNotice');
+
+  /** @type {{name:string, url:string}[]} */
+  let images = [];
+  let current = 0;          // index currently shown on the "top" layer
+  let topIsA = true;
+  let playing = false;
+  let timer = null;
+  let fadeMs = 800;
+  let holdMs = 1500;
+
+  // ---------------- natural sort (SA221a, SA221b, SA221j10 style names) ----
+  function naturalCompare(a, b) {
+    const re = /(\d+)|(\D+)/g;
+    const ax = a.match(re) || [];
+    const bx = b.match(re) || [];
+    const len = Math.max(ax.length, bx.length);
+    for (let i = 0; i < len; i++) {
+      const av = ax[i] ?? '';
+      const bv = bx[i] ?? '';
+      if (av === bv) continue;
+      const an = Number(av), bn = Number(bv);
+      const bothNum = !isNaN(an) && !isNaN(bn) && /^\d+$/.test(av) && /^\d+$/.test(bv);
+      if (bothNum) return an - bn;
+      return av < bv ? -1 : 1;
+    }
+    return 0;
+  }
+
+  // ---------------- loading files -------------------------------------------
+  function addFiles(fileList) {
+    const files = Array.from(fileList).filter(f => f.type.startsWith('image/'));
+    if (!files.length) return;
+
+    const newEntries = files.map(f => ({ name: f.webkitRelativePath || f.name, url: URL.createObjectURL(f) }));
+    const isFirstLoad = images.length === 0;
+    images = images.concat(newEntries).sort((a, b) => naturalCompare(a.name, b.name));
+
+    dropzone.classList.add('hidden');
+    viewer.classList.remove('hidden');
+
+    renderFilmstrip();
+    if (isFirstLoad) {
+      current = 0;
+      showImage(0, /*instant=*/true);
+    }
+  }
+
+  // ---------------- filmstrip -------------------------------------------
+  let dragSrcIdx = null;
+
+  function renderFilmstrip() {
+    filmstrip.innerHTML = '';
+    images.forEach((img, i) => {
+      const el = document.createElement('div');
+      el.className = 'thumb' + (i === current ? ' active' : '');
+      el.draggable = true;
+      el.title = img.name;
+      el.innerHTML = `<img src="${img.url}"><span class="idx">${i + 1}</span>`;
+
+      el.addEventListener('click', () => { stop(); showImage(i, true); });
+
+      el.addEventListener('dragstart', (e) => {
+        dragSrcIdx = i;
+        e.dataTransfer.effectAllowed = 'move';
+      });
+      el.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        el.classList.add('dragover');
+      });
+      el.addEventListener('dragleave', () => el.classList.remove('dragover'));
+      el.addEventListener('drop', (e) => {
+        e.preventDefault();
+        el.classList.remove('dragover');
+        if (dragSrcIdx === null || dragSrcIdx === i) return;
+        const moved = images.splice(dragSrcIdx, 1)[0];
+        images.splice(i, 0, moved);
+        current = images.findIndex(x => x === moved);
+        dragSrcIdx = null;
+        renderFilmstrip();
+        showImage(current, true);
+      });
+
+      filmstrip.appendChild(el);
+    });
+    const active = filmstrip.querySelector('.thumb.active');
+    if (active) active.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+  }
+
+  // ---------------- stage rendering -------------------------------------------
+  function showImage(idx, instant) {
+    if (!images.length) return;
+    current = ((idx % images.length) + images.length) % images.length;
+    const entry = images[current];
+
+    const incoming = topIsA ? imgB : imgA;
+    const outgoing = topIsA ? imgA : imgB;
+
+    incoming.style.transition = instant ? 'none' : `opacity ${fadeMs}ms ease-in-out`;
+    outgoing.style.transition = instant ? 'none' : `opacity ${fadeMs}ms ease-in-out`;
+
+    incoming.src = entry.url;
+    incoming.onload = () => {
+      incoming.classList.add('top');
+      outgoing.classList.remove('top');
+    };
+    // If already cached, onload may not fire reliably in all browsers — force it.
+    if (incoming.complete) {
+      incoming.classList.add('top');
+      outgoing.classList.remove('top');
+    }
+
+    topIsA = !topIsA;
+    filenameEl.textContent = entry.name;
+    counterEl.textContent = `${current + 1} / ${images.length}`;
+
+    [...filmstrip.children].forEach((el, i) => el.classList.toggle('active', i === current));
+    const active = filmstrip.children[current];
+    if (active) active.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+  }
+
+  function step() {
+    showImage(current + 1, false);
+  }
+
+  // ---------------- playback -------------------------------------------
+  function play() {
+    if (playing || images.length < 2) return;
+    playing = true;
+    playBtn.innerHTML = '&#10074;&#10074;';
+    scheduleNext();
+  }
+  function stop() {
+    playing = false;
+    playBtn.innerHTML = '&#9654;';
+    clearTimeout(timer);
+  }
+  function scheduleNext() {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      step();
+      if (playing) scheduleNext();
+    }, holdMs + fadeMs);
+  }
+
+  // ---------------- controls -------------------------------------------
+  playBtn.addEventListener('click', () => playing ? stop() : play());
+  prevBtn.addEventListener('click', () => { stop(); showImage(current - 1, false); });
+  nextBtn.addEventListener('click', () => { stop(); showImage(current + 1, false); });
+
+  fadeSlider.addEventListener('input', () => {
+    fadeMs = Number(fadeSlider.value);
+    fadeVal.textContent = (fadeMs / 1000).toFixed(2) + 's';
+    if (playing) scheduleNext();
+  });
+  holdSlider.addEventListener('input', () => {
+    holdMs = Number(holdSlider.value);
+    holdVal.textContent = (holdMs / 1000).toFixed(1) + 's';
+    if (playing) scheduleNext();
+  });
+
+  fullscreenBtn.addEventListener('click', () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen?.();
+    } else {
+      document.exitFullscreen?.();
+    }
+  });
+
+  addMoreBtn.addEventListener('click', () => fileInput.click());
+
+  document.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT') return;
+    if (e.code === 'Space') { e.preventDefault(); playing ? stop() : play(); }
+    if (e.code === 'ArrowRight') { stop(); showImage(current + 1, false); }
+    if (e.code === 'ArrowLeft')  { stop(); showImage(current - 1, false); }
+  });
+
+  // ---------------- file input / drag & drop -------------------------------------------
+  fileInput.addEventListener('change', (e) => addFiles(e.target.files));
+  dropzone.addEventListener('click', () => fileInput.click());
+
+  ['dragenter', 'dragover'].forEach(evt =>
+    dropzone.addEventListener(evt, (e) => { e.preventDefault(); dropzone.classList.add('drag'); }));
+  ['dragleave', 'drop'].forEach(evt =>
+    dropzone.addEventListener(evt, (e) => { e.preventDefault(); dropzone.classList.remove('drag'); }));
+  dropzone.addEventListener('drop', (e) => addFiles(e.dataTransfer.files));
+
+  // Allow dropping more images directly onto the stage once viewer is open.
+  document.addEventListener('dragover', (e) => e.preventDefault());
+  document.addEventListener('drop', (e) => {
+    if (!viewer.classList.contains('hidden') && e.target.closest('#viewer')) {
+      e.preventDefault();
+      addFiles(e.dataTransfer.files);
+    }
+  });
+
+  // ---------------- folder load with subdir/file masks -------------------------------------------
+  // Browsers won't let JS open an arbitrary typed path — <dir> is chosen via a
+  // native folder picker. Two strategies for what happens next:
+  //
+  //   'fsapi'  (Chrome/Edge, window.showDirectoryPicker): we walk directory
+  //            *handles* — reading a folder's list of entry names is cheap and
+  //            doesn't touch file content. We only recurse into a subdirectory
+  //            if its name matches the subdir mask, and only call getFile()
+  //            (which actually reads bytes) for filenames matching the file
+  //            mask. Non-matching branches of the tree are never opened.
+  //
+  //   'legacy' (Firefox/Safari, or Brave with the API blocked): the browser
+  //            only offers <input webkitdirectory>, which unconditionally
+  //            enumerates every file in the whole subtree up front — there's
+  //            no way to prune before that enumeration happens. We still
+  //            avoid creating object URLs for anything that doesn't match,
+  //            but a huge project directory will be slower to pick in these
+  //            browsers. Picking a narrower starting folder is the workaround.
+  //
+  // Brave specifically ships the File System Access API off by default (a
+  // deliberate privacy choice, not a bug) with no in-UI toggle — it's behind
+  // a flag at brave://flags/#file-system-access-api. If that flag is off,
+  // window.showDirectoryPicker is simply undefined and we fall to 'legacy'
+  // automatically; the notice below tells Brave users specifically how to
+  // unlock the pruned path instead of leaving them guessing.
+  async function isBraveBrowser() {
+    try { return !!(navigator.brave && await navigator.brave.isBrave()); }
+    catch { return false; }
+  }
+
+  async function updateModeNotice() {
+    if (window.showDirectoryPicker) {
+      modeNoticeEl.className = 'notice quiet';
+      modeNoticeEl.innerHTML = 'Pruned scanning is available — non-matching subdirectories are skipped entirely.';
+      return;
+    }
+    if (await isBraveBrowser()) {
+      modeNoticeEl.className = 'notice';
+      modeNoticeEl.innerHTML =
+        'Brave blocks pruned folder scanning by default (a privacy setting, not a bug). ' +
+        'To enable it: open <code>brave://flags/#file-system-access-api</code>, set it to Enabled, ' +
+        'then relaunch Brave. Until then, choosing a folder here will scan its entire subtree first ' +
+        'and filter afterward — fine for a single session folder, slow for a whole project directory.';
+      return;
+    }
+    modeNoticeEl.className = 'notice';
+    modeNoticeEl.innerHTML =
+      'This browser doesn\'t support pruned folder scanning, so choosing a folder will enumerate its ' +
+      'entire subtree before the masks can filter it. Chrome or Edge (or Brave with the flag above) ' +
+      'will scan only matching subdirectories instead.';
+  }
+
+  let mode = null;              // 'fsapi' | 'legacy' | null
+  let rootDirHandle = null;     // fsapi: the chosen root directory handle
+  let fsMatches = [];           // fsapi: [{ label, fileHandle }]
+  let pendingFolderFiles = [];  // legacy: flat File[] from webkitdirectory
+  let debounceTimer = null;
+
+  function globToRegExp(pattern) {
+    const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+    const withWildcards = escaped.replace(/\*/g, '.*').replace(/\?/g, '.');
+    return new RegExp('^' + withWildcards + '$', 'i');
+  }
+
+  function isImageName(name) {
+    return /\.(jpe?g|png|gif|webp|bmp|tiff?|avif)$/i.test(name);
+  }
+
+  // ---- fsapi strategy: prune before reading anything ----
+  async function scanFsApi(dirHandle, subdirMask, fileMask) {
+    const dirRe  = globToRegExp(subdirMask || '*');
+    const fileRe = globToRegExp(fileMask || '*');
+    const matches = [];
+
+    for await (const [name, handle] of dirHandle.entries()) {
+      if (handle.kind === 'file') {
+        if (isImageName(name) && fileRe.test(name)) {
+          matches.push({ label: name, fileHandle: handle });
+        }
+      } else if (handle.kind === 'directory' && dirRe.test(name)) {
+        for await (const [subName, subHandle] of handle.entries()) {
+          if (subHandle.kind === 'file' && isImageName(subName) && fileRe.test(subName)) {
+            matches.push({ label: `${name}/${subName}`, fileHandle: subHandle });
+          }
+        }
+      }
+    }
+    return matches;
+  }
+
+  // ---- legacy strategy: everything already enumerated, just filter in memory ----
+  function splitRelativePath(file) {
+    const rel = file.webkitRelativePath || file.name;
+    const segments = rel.split('/');
+    return { dirSegments: segments.slice(1, -1), filename: segments[segments.length - 1] };
+  }
+
+  function filterFolderFiles(files, subdirMask, fileMask) {
+    const dirRe  = globToRegExp(subdirMask || '*');
+    const fileRe = globToRegExp(fileMask || '*');
+    return files.filter(f => {
+      if (!f.type.startsWith('image/')) return false;
+      const { dirSegments, filename } = splitRelativePath(f);
+      const dirOk = dirSegments.length === 0 || dirSegments.some(seg => dirRe.test(seg));
+      return dirOk && fileRe.test(filename);
+    });
+  }
+
+  async function rescanAndCount() {
+    if (mode === 'fsapi') {
+      matchCountEl.textContent = 'Scanning…';
+      fsMatches = await scanFsApi(rootDirHandle, subdirMaskInput.value, fileMaskInput.value);
+      matchCountEl.innerHTML = `<span class="n">${fsMatches.length}</span> files match`;
+    } else if (mode === 'legacy') {
+      const matched = filterFolderFiles(pendingFolderFiles, subdirMaskInput.value, fileMaskInput.value);
+      matchCountEl.innerHTML = `<span class="n">${matched.length}</span> of ${pendingFolderFiles.length} files match`;
+    } else {
+      matchCountEl.textContent = 'Choose a folder to scan.';
+    }
+  }
+
+  function debouncedRescan() {
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(rescanAndCount, 350);
+  }
+
+  function openFolderModal() {
+    mode = null;
+    rootDirHandle = null;
+    fsMatches = [];
+    pendingFolderFiles = [];
+    subdirMaskInput.value = localStorage.getItem('crossfade.subdirMask') || '*';
+    fileMaskInput.value   = localStorage.getItem('crossfade.fileMask')   || '*_600.jpg';
+    matchCountEl.textContent = 'Choose a folder to scan.';
+    folderModal.classList.remove('hidden');
+    updateModeNotice();
+  }
+
+  function closeFolderModal() {
+    folderModal.classList.add('hidden');
+    folderInput.value = ''; // allow re-picking the same folder later
+    mode = null;
+    rootDirHandle = null;
+    fsMatches = [];
+    pendingFolderFiles = [];
+  }
+
+  async function chooseFolder() {
+    if (window.showDirectoryPicker) {
+      try {
+        rootDirHandle = await window.showDirectoryPicker();
+      } catch (err) {
+        return; // user cancelled the native picker
+      }
+      mode = 'fsapi';
+      await rescanAndCount();
+    } else {
+      mode = 'legacy';
+      folderInput.click(); // its 'change' handler below calls rescanAndCount
+    }
+  }
+
+  folderLink.addEventListener('click', (e) => {
+    e.stopPropagation(); // don't let the click bubble up to the dropzone's own handler
+    openFolderModal();
+  });
+  addFolderBtn.addEventListener('click', openFolderModal);
+  chooseFolderBtn.addEventListener('click', chooseFolder);
+
+  folderInput.addEventListener('change', (e) => {
+    pendingFolderFiles = Array.from(e.target.files);
+    if (!pendingFolderFiles.length) return;
+    rescanAndCount();
+  });
+
+  subdirMaskInput.addEventListener('input', debouncedRescan);
+  fileMaskInput.addEventListener('input', debouncedRescan);
+
+  folderCancelBtn.addEventListener('click', closeFolderModal);
+
+  folderLoadBtn.addEventListener('click', async () => {
+    localStorage.setItem('crossfade.subdirMask', subdirMaskInput.value);
+    localStorage.setItem('crossfade.fileMask', fileMaskInput.value);
+
+    // Don't trust a possibly-stale debounced scan — the mask fields may have
+    // changed within the last 350ms. Always re-scan fresh, right now, from
+    // whatever is currently in the boxes.
+    clearTimeout(debounceTimer);
+
+    let finalFiles = [];
+    if (mode === 'fsapi') {
+      matchCountEl.textContent = 'Scanning…';
+      fsMatches = await scanFsApi(rootDirHandle, subdirMaskInput.value, fileMaskInput.value);
+      finalFiles = await Promise.all(fsMatches.map(async m => {
+        const raw = await m.fileHandle.getFile();
+        return new File([raw], m.label, { type: raw.type });
+      }));
+    } else if (mode === 'legacy') {
+      finalFiles = filterFolderFiles(pendingFolderFiles, subdirMaskInput.value, fileMaskInput.value);
+    }
+
+    if (!finalFiles.length) {
+      matchCountEl.textContent = 'No files match — adjust the masks and try again.';
+      return;
+    }
+    addFiles(finalFiles);
+    closeFolderModal();
+  });
+})();
+</script>
+</body>
+</html>
