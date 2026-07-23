@@ -1346,6 +1346,7 @@ def _restore_super_areas_from_session(super_areas_data: list) -> list:
 # ---------------------------------------------------------------------------
 
 def _draw_info_panel(state: "_EdgemapState", panel_h: int) -> np.ndarray:
+    print(f"[DBG] info panel_h={panel_h}  export_cy={_INFO_EXPORT_CY}")
     """Secondary column: Take details, Lab bars, color swatches."""
     W = _CTRL2_W
     P = np.full((panel_h, W, 3), 22, dtype=np.uint8)
@@ -1390,7 +1391,8 @@ def _draw_info_panel(state: "_EdgemapState", panel_h: int) -> np.ndarray:
             diff_col = (85, 55, 20) if diff_enabled else (42, 38, 34)
             _draw_button(P, "DIFF", _INFO_CX_LOCAL, _INFO_DIFF_CY,
                          diff_col, _INFO_BTN_W2, _OC_BTN_H)
-        _draw_button(P, "EXPORT SHAPE", _INFO_CX_LOCAL, _INFO_EXPORT_CY,
+        _export_cy = min(_INFO_EXPORT_CY, panel_h - _OC_BTN_H)
+        _draw_button(P, "EXPORT SHAPE", _INFO_CX_LOCAL, _export_cy,
                      (25, 100, 130), _INFO_BTN_W2, _OC_BTN_H)
     elif state.local_mode:
         hline(_INFO_OVL_CY - 24)
@@ -1849,7 +1851,8 @@ def _edgemap_mouse(event: int, x: int, y: int, flags: int, param) -> None:
                 state.diff_a_idx  = state.preview_take_idx
                 state.diff_b_idx  = None
                 state.edges_dirty = True
-            elif _hit_button(x, y, _INFO_CX_HIT, _INFO_EXPORT_CY,
+            elif _hit_button(x, y, _INFO_CX_HIT,
+                             min(_INFO_EXPORT_CY, state.main_panel_h - _OC_BTN_H),
                              _INFO_BTN_W2, _OC_BTN_H):
                 state.export_requested = True
                 state.done             = True
