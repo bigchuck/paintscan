@@ -59,15 +59,16 @@ MAX_RING_AREA_FRAC = 0.80
 
 
 # ---------------------------------------------------------------------------
-# Config  (~/.paintscan/config.json)
+# Config  (repo-local config.json, beside this module)
 # ---------------------------------------------------------------------------
 
-CONFIG_DIR  = Path.home() / ".paintscan"
-CONFIG_PATH = CONFIG_DIR / "config.json"
+# Resolved from __file__ so the file is found regardless of the working
+# directory main.py is launched from.
+CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 
 
 def load_config() -> dict:
-    """Load the user-level config.  Never raises; missing/corrupt -> {}."""
+    """Load the config.  Never raises; missing/corrupt -> {}."""
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
             data = json.load(fh)
@@ -77,9 +78,9 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict) -> bool:
-    """Write the user-level config.  Returns True on success."""
+    """Write the config.  Returns True on success."""
     try:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(CONFIG_PATH, "w", encoding="utf-8") as fh:
             json.dump(cfg, fh, indent=2)
             fh.write("\n")
