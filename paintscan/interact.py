@@ -1346,10 +1346,10 @@ def _restore_super_areas_from_session(super_areas_data: list) -> list:
 # ---------------------------------------------------------------------------
 
 def _draw_info_panel(state: "_EdgemapState", panel_h: int) -> np.ndarray:
-    print(f"[DBG] info panel_h={panel_h}  export_cy={_INFO_EXPORT_CY}")
     """Secondary column: Take details, Lab bars, color swatches."""
     W = _CTRL2_W
     P = np.full((panel_h, W, 3), 22, dtype=np.uint8)
+    print(f"[DBG] info panel_h={panel_h}  export_cy={_INFO_EXPORT_CY}")
 
     def lbl(txt, y, col=(140,140,140), sc=0.40):
         cv2.putText(P, txt, (8, y), cv2.FONT_HERSHEY_SIMPLEX, sc, col, 1, cv2.LINE_AA)
