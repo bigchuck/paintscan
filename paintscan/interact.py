@@ -3012,7 +3012,9 @@ _EX_STATUS_Y   = _EX_CLOSE_CY + 40
 _EX_TOTAL_H    = _EX_STATUS_Y + 136
 
 _EX_VERTEX_R   = 5      # drawn radius
-_EX_HIT_R      = 11     # click tolerance
+_EX_HIT_R      = 11     # vertex click tolerance
+_EX_SEG_HIT_R  = 8      # segment click tolerance (insert vertex)
+_EX_DRAG_SLOP  = 4      # px of movement before a press becomes a drag
 _EX_CHAIN_COLS = [
     (0, 140, 255), (0, 190,  60), (200,  60, 200), (230, 160,   0),
     (60,  60, 230), (0, 200, 200), (140,  90,   0), (90,   0, 160),
@@ -3048,6 +3050,9 @@ class _ExportState:
     drag_idx:       Optional[int] = None     # slider being dragged
     vdrag:          Optional[tuple] = None   # (chain_idx, vertex_idx) being dragged
     armed_end:      Optional[tuple] = None   # (chain_idx, 0 or -1)
+    press_pos:      Optional[tuple] = None   # display coords of last L-press
+    press_end:      Optional[tuple] = None   # end under the press, if any
+    moved:          bool = False             # press has become a drag
     edited:         bool = False             # any manual edit yet -> EPS locked
     export_requested: bool = False
     pending_eps:    Optional[int] = None     # EPS moved while locked
@@ -3141,6 +3146,52 @@ def _ex_join(es: _ExportState, a: tuple, b: tuple) -> None:
     _ex_mark_edited(es)
 
 
+def _ex_hit_segment(es: _ExportState, dx: int, dy: int) -> Optional[tuple]:
+    """Nearest segment within _EX_SEG_HIT_R.
+
+    Returns (chain_idx, insert_index, (px, py)) where (px, py) is the
+    perpendicular projection of the click onto the segment.
+    """
+    best, bestd = None, float(_EX_SEG_HIT_R ** 2)
+    for ci, ch in enumerate(es.chains):
+        pts = ch["pts"]
+        n   = len(pts)
+        if n < 2:
+            continue
+        last = n if ch["closed"] else n - 1
+        for i in range(last):
+            ax, ay = float(pts[i][0]), float(pts[i][1])
+            bx, by = float(pts[(i + 1) % n][0]), float(pts[(i + 1) % n][1])
+            vx, vy = bx - ax, by - ay
+            L2 = vx * vx + vy * vy
+            if L2 <= 0.0:
+                continue
+            t = ((dx - ax) * vx + (dy - ay) * vy) / L2
+            t = max(0.0, min(1.0, t))
+            px, py = ax + t * vx, ay + t * vy
+            d = (px - dx) ** 2 + (py - dy) ** 2
+            if d <= bestd:
+                bestd = d
+                best  = (ci, i + 1, (int(round(px)), int(round(py))))
+    return best
+
+
+def _ex_delete_vertex(es: _ExportState, ci: int, vi: int) -> None:
+    """Remove a single vertex, keeping the chain viable."""
+    ch    = es.chains[ci]
+    n     = len(ch["pts"])
+    floor = 3 if ch["closed"] else 2
+    if n <= floor:
+        es.status     = f"cannot delete - chain would drop below {floor} vertices"
+        es.status_col = (80, 140, 240)
+        return
+    ch["pts"]    = np.delete(ch["pts"], vi, axis=0)
+    es.armed_end = None
+    es.status     = f"vertex deleted ({n - 1} left)"
+    es.status_col = (160, 160, 160)
+    _ex_mark_edited(es)
+
+
 def _ex_delete_chain(es: _ExportState, ci: int) -> None:
     n = len(es.chains[ci]["pts"])
     del es.chains[ci]
@@ -3194,9 +3245,11 @@ def _ex_draw_ctrl(es: _ExportState) -> np.ndarray:
 
     y += 10
     for line in ["L-click end + end = join",
-                 "L-drag vertex   = move",
-                 "R-click chain   = delete",
-                 "Same chain ends = close"]:
+                 "L-drag vertex     = move",
+                 "L-click segment   = insert vertex",
+                 "R-click vertex    = delete vertex",
+                 "Shift+R-click     = delete chain",
+                 "Same chain ends   = close"]:
         cv2.putText(P, line, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.38,
                     (120, 120, 120), 1, cv2.LINE_AA)
         y += 17
@@ -3315,30 +3368,45 @@ def _ex_mouse(event, x, y, flags, es: _ExportState) -> None:
         if not on_work:
             return
 
-        end = _ex_hit_end(es, dx, dy)
-        if end is not None:
-            if es.armed_end is None:
-                es.armed_end  = end
-                es.status     = "end armed — click the partner end"
-                es.status_col = _EX_ARM_COL
-            else:
-                _ex_join(es, es.armed_end, end)
-                es.armed_end = None
-            es.dirty = True
-            return
+        # A press over a vertex or end is ambiguous: it becomes a drag if the
+        # mouse moves, and a click (join) if it does not.  Decide on release.
+        es.press_pos = (dx, dy)
+        es.moved     = False
+        es.press_end = _ex_hit_end(es, dx, dy)
 
         v = _ex_hit_vertex(es, dx, dy)
         if v is not None:
             es.vdrag = v
+        elif es.press_end is not None:
+            ci, e = es.press_end
+            es.vdrag = (ci, 0 if e == 0 else len(es.chains[ci]["pts"]) - 1)
+        else:
+            seg = _ex_hit_segment(es, dx, dy)
+            if seg is not None:
+                ci, idx, pt = seg
+                es.chains[ci]["pts"] = np.insert(
+                    es.chains[ci]["pts"], idx, np.array(pt, dtype=np.int32), axis=0)
+                es.vdrag      = (ci, idx)
+                es.moved      = True        # insertion is an edit; drag immediately
+                es.status     = "vertex inserted - drag to place"
+                es.status_col = (200, 200, 200)
+                _ex_mark_edited(es)
         es.dirty = True
 
     elif event == cv2.EVENT_RBUTTONDOWN:
         if not on_work:
             return
         v = _ex_hit_vertex(es, dx, dy)
-        if v is not None:
-            _ex_delete_chain(es, v[0])
-            es.dirty = True
+        if flags & cv2.EVENT_FLAG_SHIFTKEY:
+            ci = v[0] if v is not None else None
+            if ci is None:
+                seg = _ex_hit_segment(es, dx, dy)
+                ci  = seg[0] if seg is not None else None
+            if ci is not None:
+                _ex_delete_chain(es, ci)
+        elif v is not None:
+            _ex_delete_vertex(es, v[0], v[1])
+        es.dirty = True
 
     elif event == cv2.EVENT_MOUSEMOVE:
         if es.drag_idx is not None:
@@ -3351,12 +3419,17 @@ def _ex_mouse(event, x, y, flags, es: _ExportState) -> None:
                     sl.value = nv
                 es.dirty = True
         elif es.vdrag is not None and on_work:
-            ci, vi = es.vdrag
-            if 0 <= ci < len(es.chains):
-                es.chains[ci]["pts"][vi] = (max(0, min(dx, dw - 1)),
-                                            max(0, min(dy, dh - 1)))
-                _ex_mark_edited(es)
-                es.dirty = True
+            if not es.moved and es.press_pos is not None:
+                if (abs(dx - es.press_pos[0]) + abs(dy - es.press_pos[1])
+                        > _EX_DRAG_SLOP):
+                    es.moved = True
+            if es.moved:
+                ci, vi = es.vdrag
+                if 0 <= ci < len(es.chains) and vi < len(es.chains[ci]["pts"]):
+                    es.chains[ci]["pts"][vi] = (max(0, min(dx, dw - 1)),
+                                                max(0, min(dy, dh - 1)))
+                    _ex_mark_edited(es)
+                    es.dirty = True
 
     elif event == cv2.EVENT_LBUTTONUP:
         if es.drag_idx is not None:
@@ -3365,10 +3438,21 @@ def _ex_mouse(event, x, y, flags, es: _ExportState) -> None:
                 es.status_col = (80, 140, 240)
             else:
                 _ex_regen(es)          # live tuning before any manual edit
-        es.drag_idx = None
-        es.vdrag    = None
-        es.dirty    = True
-
+        elif not es.moved and es.press_end is not None:
+            # a click, not a drag -> join semantics
+            if es.armed_end is None:
+                es.armed_end  = es.press_end
+                es.status     = "end armed - click the partner end"
+                es.status_col = _EX_ARM_COL
+            else:
+                _ex_join(es, es.armed_end, es.press_end)
+                es.armed_end = None
+        es.drag_idx  = None
+        es.vdrag     = None
+        es.press_pos = None
+        es.press_end = None
+        es.moved     = False
+        es.dirty     = True
 
 def _run_export(state: "_EdgemapState", out_dir: Path) -> None:
     """Standalone shape-export dialog.  Does not touch the session."""
