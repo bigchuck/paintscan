@@ -1349,7 +1349,6 @@ def _draw_info_panel(state: "_EdgemapState", panel_h: int) -> np.ndarray:
     """Secondary column: Take details, Lab bars, color swatches."""
     W = _CTRL2_W
     P = np.full((panel_h, W, 3), 22, dtype=np.uint8)
-    print(f"[DBG] info panel_h={panel_h}  export_cy={_INFO_EXPORT_CY}")
 
     def lbl(txt, y, col=(140,140,140), sc=0.40):
         cv2.putText(P, txt, (8, y), cv2.FONT_HERSHEY_SIMPLEX, sc, col, 1, cv2.LINE_AA)
@@ -2991,7 +2990,8 @@ _EX_WINDOW = "paintscan - shape export  (E=export  R=regen  Esc=close)"
 
 _EX_CTRL_W   = 300
 _EX_CTRL_TOP = 38
-_EX_BAND_H   = 74
+_EX_DISP_H   = 700   # fixed target panel height, as print preview does
+_EX_BAND_H   = 58
 _EX_HANDLE_R = 9
 
 # Slider order must match _EX_SLIDER_DEFS
@@ -3005,11 +3005,11 @@ _EX_SLIDER_DEFS = [
 
 _EX_BTN_W, _EX_BTN_H = 200, 30
 _EX_BTN_CX     = _EX_CTRL_W // 2
-_EX_REGEN_CY   = _EX_CTRL_TOP + 5 * _EX_BAND_H + 30
-_EX_EXPORT_CY  = _EX_REGEN_CY + 42
-_EX_CLOSE_CY   = _EX_EXPORT_CY + 42
-_EX_STATUS_Y   = _EX_CLOSE_CY + 44
-_EX_TOTAL_H    = _EX_STATUS_Y + 150
+_EX_REGEN_CY   = _EX_CTRL_TOP + 5 * _EX_BAND_H + 26
+_EX_EXPORT_CY  = _EX_REGEN_CY + 40
+_EX_CLOSE_CY   = _EX_EXPORT_CY + 40
+_EX_STATUS_Y   = _EX_CLOSE_CY + 40
+_EX_TOTAL_H    = _EX_STATUS_Y + 136
 
 _EX_VERTEX_R   = 5      # drawn radius
 _EX_HIT_R      = 11     # click tolerance
@@ -3021,6 +3021,19 @@ _EX_CHAIN_COLS = [
 _EX_END_COL    = (0, 0, 255)      # open-end ring
 _EX_ARM_COL    = (0, 255, 255)    # armed end
 _EX_CLOSED_COL = (40, 220, 40)    # closed ring
+
+
+def _ex_panel_size(image: np.ndarray) -> tuple[int, int]:
+    """Panel size for the export window.
+
+    Uses a fixed target height rather than filling the screen, so a tall
+    portrait sketch does not produce a 990px window.
+    """
+    ih, iw  = image.shape[:2]
+    sw, _sh = _get_screen_size()
+    avail_w = (sw - _EX_CTRL_W - _BORDER * 6) // 2
+    scale   = min(avail_w / max(iw, 1), _EX_DISP_H / max(ih, 1))
+    return max(1, int(iw * scale)), max(1, int(ih * scale))
 
 
 @dataclass
@@ -3359,7 +3372,7 @@ def _ex_mouse(event, x, y, flags, es: _ExportState) -> None:
 
 def _run_export(state: "_EdgemapState", out_dir: Path) -> None:
     """Standalone shape-export dialog.  Does not touch the session."""
-    dw, dh = _compute_panel_size_colorize(state.warped_full)
+    dw, dh = _ex_panel_size(state.warped_full)
     disp   = cv2.resize(state.warped_full, (dw, dh), interpolation=cv2.INTER_AREA)
     h_full, w_full = state.warped_full.shape[:2]
 
